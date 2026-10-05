@@ -437,8 +437,8 @@ def classification_metrics(y_true, y_pred, labels: dict, color_map: dict, title:
         for b, v in zip(bars, vals):
             ax[0].text(b.get_x() + b.get_width() / 2, v + 0.01, f"{v:.2f}", ha="center", fontsize=7.5)
     ax[0].set_xticks(x); ax[0].set_xticklabels([f"{n}\n(n={k})" for n, k in zip(names, s)])
-    ax[0].set_ylim(0, 1.1); ax[0].legend(loc="upper right", fontsize=9)
-    ax[0].axhline(mf1, color="k", ls="--", lw=1); ax[0].text(len(ids) - 0.5, mf1 + 0.015, f"macro-F1 {mf1:.2f}", ha="right", fontsize=9)
+    ax[0].set_ylim(0, 1.1); ax[0].legend(loc="upper center", bbox_to_anchor=(0.5, -0.13), ncol=3, fontsize=9)
+    ax[0].axhline(mf1, color="k", ls="--", lw=1); ax[0].text(-0.45, mf1 + 0.015, f"macro-F1 {mf1:.2f}", ha="left", fontsize=9, bbox=dict(fc="white", ec="none", alpha=0.8))
     ax[0].set_title(f"클래스별 성능 (정확도 {acc:.1%}, macro-F1 {mf1:.2f})")
     ax[0].spines[["top", "right"]].set_visible(False)
 
@@ -507,3 +507,92 @@ def agreement_by_type(df, type_col: str, rate_cols: dict, color_map: dict, order
         fig.suptitle(title, fontsize=14)
     plt.tight_layout()
     plt.show()
+
+
+# ─────────────────────────────────────────────────────────────
+# 패치(타일) 단위 결과 — foundation model 노트북용
+# ─────────────────────────────────────────────────────────────
+def image_grid(images, titles=None, ncols=8, size=1.6, border_colors=None, suptitle=None, row_labels=None):
+    """이미지 여러 장을 격자로. border_colors: 각 이미지 테두리 색 (R, G, B) 또는 None"""
+    n = len(images)
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * size, nrows * (size + 0.25)), squeeze=False)
+    for k, a in enumerate(axes.ravel()):
+        a.set_xticks([]); a.set_yticks([])
+        if k >= n:
+            a.axis("off"); continue
+        a.imshow(images[k])
+        if titles is not None:
+            a.set_title(titles[k], fontsize=8)
+        col = border_colors[k] if border_colors is not None else None
+        for s in a.spines.values():
+            s.set_visible(col is not None)
+            if col is not None:
+                s.set_edgecolor(np.array(col) / 255); s.set_linewidth(3)
+    if row_labels:
+        for r, lab in enumerate(row_labels):
+            axes[r, 0].set_ylabel(lab, rotation=0, ha="right", va="center", fontsize=10)
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+
+def _tile_overlay(thumb, ds, xy, tile, rgb, alpha):
+    """썸네일 위에 타일별 색을 반투명하게 칠한 이미지"""
+    over = thumb.copy()
+    s = max(1, int(round(tile / ds)))
+    for (x, y), c in zip(np.asarray(xy), rgb):
+        x0, y0 = int(x / ds), int(y / ds)
+        over[y0:y0 + s, x0:x0 + s] = c
+    return (thumb * (1 - alpha) + over * alpha).astype(np.uint8)
+
+
+def tile_map(thumb, ds, xy, tile, labels=None, color_map=None, values=None, cmap="magma", vmin=None, vmax=None,
+             alpha=0.55, title="", ax=None, legend_order=None, colorbar_label=None):
+    """슬라이드 썸네일 위에 타일 결과를 칠한 정적 지도.
+
+    labels + color_map: 범주형 (예: 조직 타입) / values + cmap: 연속형 (예: 확률, 유사도)
+    xy: 타일 왼쪽 위 level-0 좌표, tile: 타일 한 변 level-0 px
+    """
+    own = ax is None
+    if own:
+        fig, ax = plt.subplots(figsize=(14, 14 * thumb.shape[0] / thumb.shape[1] + 0.6))
+    if labels is not None:
+        rgb = np.array([color_map[l] for l in labels], float)
+        ax.imshow(_tile_overlay(thumb, ds, xy, tile, rgb, alpha))
+        present = [l for l in (legend_order or sorted(set(labels))) if l in set(labels)]
+        legend(ax, [(l, color_map[l]) for l in present])
+    else:
+        values = np.asarray(values, float)
+        lo = np.nanmin(values) if vmin is None else vmin
+        hi = np.nanmax(values) if vmax is None else vmax
+        cm = plt.get_cmap(cmap)
+        rgb = cm(np.clip((values - lo) / (hi - lo + 1e-9), 0, 1))[:, :3] * 255
+        ax.imshow(_tile_overlay(thumb, ds, xy, tile, rgb, alpha))
+        sm = plt.cm.ScalarMappable(cmap=cm, norm=plt.Normalize(lo, hi))
+        plt.colorbar(sm, ax=ax, fraction=0.025, label=colorbar_label)
+    ax.set_title(title); ax.set_xticks([]); ax.set_yticks([])
+    if own:
+        plt.tight_layout(); plt.show()
+
+
+def tile_map_interactive(thumb, ds, xy, tile, labels, color_map, hover=None, title="", order=None, height=650, alpha=0.5):
+    """타일 지도 plotly 버전: 확대/이동, 타일에 마우스를 올리면 hover 정보, 범례로 타입 켜고 끄기."""
+    import plotly.graph_objects as go
+    xy = np.asarray(xy, float); labels = np.asarray(labels)
+    fig = go.Figure([_scaled_thumb(thumb, ds)])
+    hover = np.asarray(hover) if hover is not None else labels
+    for lab in [o for o in (order or sorted(set(labels))) if o in set(labels)]:
+        m = labels == lab
+        r, g, b = (int(v) for v in color_map[lab])
+        xs, ys = [], []
+        for x, y in xy[m]:
+            xs += [x, x + tile, x + tile, x, x, None]; ys += [y, y, y + tile, y + tile, y, None]
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", fill="toself", fillcolor=f"rgba({r},{g},{b},{alpha})",
+                                 line=dict(width=0), name=f"{lab} ({m.sum()})", legendgroup=lab, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=xy[m, 0] + tile / 2, y=xy[m, 1] + tile / 2, mode="markers",
+                                 marker=dict(size=4, opacity=0.01), text=hover[m], legendgroup=lab, showlegend=False,
+                                 hovertemplate="%{text}<extra></extra>"))
+    _layout(fig, title, height, (0, 0, thumb.shape[1] * ds, thumb.shape[0] * ds))
+    fig.show(config={"scrollZoom": True})
