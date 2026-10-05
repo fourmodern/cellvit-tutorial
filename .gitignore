@@ -1,0 +1,10 @@
+.venv/
+models/
+test_database/
+cellvitpp_repo/
+outputs/
+NanumGothic-Regular.ttf
+__pycache__/
+.ipynb_checkpoints/
+executed/
+.omc/
