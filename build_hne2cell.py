@@ -139,6 +139,15 @@ def cells():
             'plt.rcParams["font.family"] = fm.FontProperties(fname=str(_font)).get_name()\n'
             'plt.rcParams["axes.unicode_minus"] = False\n'
             "\n"
+            "# 공통 시각화 도구 viz.py: 저장소에 있으면 그대로, 없으면(Colab) GitHub에서 받기\n"
+            "for _d in [WORKDIR, WORKDIR.parent]:\n"
+            '    if (_d / "viz.py").exists():\n'
+            "        sys.path.insert(0, str(_d)); break\n"
+            "else:\n"
+            '    urllib.request.urlretrieve("https://raw.githubusercontent.com/fourmodern/cellvit-tutorial/main/viz.py", WORKDIR / "viz.py")\n'
+            "    sys.path.insert(0, str(WORKDIR))\n"
+            "import viz\n"
+            "\n"
             'CONFIG = json.loads((CODE_DIR / "config.json").read_text())\n'
             'CELL_TYPES = {int(k): v for k, v in CONFIG["id2label"].items()}  # 0=Background, 1~15\n'
             'print("device:", DEVICE, "| torch", torch.__version__)\n'
@@ -476,21 +485,50 @@ def cells():
             '[a.axis("off") for a in ax]\n'
             "plt.tight_layout(); plt.show()"
         ),
-        md("### 5-2. 세포 조성"),
+        md(
+            "### 5-1b. 조직 사진에서 직접 확인하기\n"
+            "\n"
+            "아래 그림들은 **색 정규화 전 원본 H&E**에 결과를 겹쳐 보여 줍니다.\n"
+            "\n"
+            "1. **인터랙티브 뷰어** (2,048×2,048 px, 원본 해상도): 휠로 확대, 세포에 마우스를 올리면 타입·확신도·면적, 범례로 타입 켜고 끄기\n"
+            "2. **슬라이드 탐색기**: 슬라이더로 ROI 안 아무 곳이나 원본 해상도로 보기 (Colab/Jupyter에서 동작)\n"
+            "3. **타입별 세포 갤러리**: 15종 각각으로 분류된 실제 세포 사진 — 같은 줄끼리 형태가 비슷한지 확인"
+        ),
         code(
-            "order = [CELL_TYPES[k] for k in range(1, 16)]\n"
-            "cnt = cells_df.cell_type.value_counts().reindex(order, fill_value=0)\n"
+            "CELL_OBJS = [dict(contour=cnt, centroid=(x, y), type=t, name=n, prob=p, area=a)\n"
+            "             for cnt, t, n, p, a, x, y in zip(contours, cells_df.type, cells_df.cell_type, cells_df.type_prob,\n"
+            "                                               cells_df.area_um2, cells_df.x, cells_df.y)]\n"
+            "hne_color = lambda c: COLORS[c[\"type\"]]\n"
+            "hne_label = lambda c: c[\"name\"]\n"
+            "hne_hover = lambda c: f\"<b>{c['name']}</b> ({TIER2_TO_TIER1[c['name']]})<br>확신도 {c['prob']:.2f}<br>핵 면적 {c['area']:.0f} µm²\"\n"
+            "HNE_ORDER = [CELL_TYPES[k] for k in range(1, 16)]\n"
             "\n"
-            "fig, ax = plt.subplots(1, 2, figsize=(18, 5), gridspec_kw={\"width_ratios\": [3, 1]})\n"
-            "ax[0].bar(order, cnt.values, color=[np.array(COLORS[k]) / 255 for k in range(1, 16)], ec=\"k\")\n"
-            'ax[0].set_yscale("log"); ax[0].set_ylabel("세포 수 (log)"); ax[0].set_title("세포 타입 (15종)")\n'
-            'ax[0].tick_params(axis="x", rotation=45)\n'
-            "t1 = cells_df.tier1.value_counts(normalize=True).reindex(TIER1_COLORS)\n"
-            "ax[1].pie(t1.values, labels=[f\"{k}\\n{v:.0%}\" for k, v in t1.items()], colors=[np.array(c) / 255 for c in TIER1_COLORS.values()])\n"
-            'ax[1].set_title("계통 그룹 비율")\n'
-            "plt.tight_layout(); plt.show()\n"
-            "\n"
-            'print(cells_df.groupby("cell_type").agg(n=("type", "size"), 핵면적_µm2=("area_um2", "median"), type_prob=("type_prob", "mean")).reindex(order).round(2))'
+            "vx, vy, vs_ = ROI_X + 512, ROI_Y + 4096, 2048  # 종양 · 림프 소포 경계\n"
+            "sub = [c for c in CELL_OBJS if vx <= c[\"centroid\"][0] < vx + vs_ and vy <= c[\"centroid\"][1] < vy + vs_]\n"
+            "viz.interactive(read_rgb(vx, vy, vs_, vs_), sub, hne_color, hne_label, hover_of=hne_hover, order=HNE_ORDER,\n"
+            "                offset=(vx, vy), title=f\"HNE2Cell 15종 — 원본 H&E {vs_}×{vs_}px (휠로 확대, 범례 클릭)\", height=850)"
+        ),
+        code(
+            "viz.region_explorer(read_rgb, cells_df[[\"x\", \"y\"]].values, CELL_OBJS, hne_color, hne_label,\n"
+            "                    [(CELL_TYPES[k], COLORS[k]) for k in range(1, 16)], thumb, DS,\n"
+            "                    x_range=x_range, y_range=(y_range[0], min(y_range[1], H)),\n"
+            "                    init=(ROI_X + 1700, ROI_Y + 5400), sizes=(256, 512, 1024, 2048))"
+        ),
+        code(
+            "viz.cell_gallery(CELL_OBJS, hne_label, hne_color, order=HNE_ORDER, get_crop=lambda x, y, s: read_rgb(x, y, s, s),\n"
+            '                 n=12, size=64, title="HNE2Cell 타입별 세포 (원본 H&E, 64×64px = 16×16µm)")'
+        ),
+        md("### 5-2. 세포 조성"),
+        md(
+            "타입별 세포 수·비율, **모델 확신도**(`type_prob`: 핵 안 픽셀 중 다수결 타입 비율), **핵 면적** 분포입니다. "
+            "정답 라벨이 없으므로 정확도 대신 확신도를 보여 줍니다 — 확신도가 낮은 타입(예: 드문 면역세포)은 해석에 주의하세요."
+        ),
+        code(
+            "viz.type_summary(cells_df, \"cell_type\", {CELL_TYPES[k]: COLORS[k] for k in range(1, 16)}, order=HNE_ORDER,\n"
+            '                 value_cols={"type_prob": "모델 확신도", "area_um2": "핵 면적 (µm²)"},\n'
+            '                 title="HNE2Cell 15종 분포 (ROI)")\n'
+            "viz.type_summary(cells_df, \"tier1\", TIER1_COLORS, order=list(TIER1_COLORS),\n"
+            '                 value_cols={"type_prob": "모델 확신도"}, title="계통 그룹 분포")'
         ),
         md(
             "### 5-3. 공간 분석 예시\n"
@@ -528,6 +566,13 @@ def cells():
             "       .query(\"n >= 50 and b_frac >= 0.3\"))\n"
             'print(f"\\nTLS 후보 {len(tls)}개")\n'
             "print(tls.round(2))"
+        ),
+        code(
+            "# 타입별 '가장 가까운 종양세포까지 거리' 분포 — 어떤 세포가 종양 가까이(안쪽) 있고 어떤 세포가 멀리(기질·림프 소포) 있는지\n"
+            "non_tumor = cells_df[cells_df.cell_type != \"Malignant\"]\n"
+            "viz.type_summary(non_tumor, \"cell_type\", {CELL_TYPES[k]: COLORS[k] for k in range(1, 16)}, order=HNE_ORDER[1:],\n"
+            '                 value_cols={"dist_to_tumor_um": "가장 가까운 종양세포까지 거리 (µm)"}, log_count=True,\n'
+            '                 title="종양세포가 아닌 세포들의 종양까지 거리")'
         ),
         code(
             "fig, ax = plt.subplots(1, 2, figsize=(20, 9.5))\n"

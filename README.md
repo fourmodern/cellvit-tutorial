@@ -7,6 +7,21 @@
 | `03_HNE2Cell.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/03_HNE2Cell.ipynb) | HNE2Cell: 공간전사체 라벨로 학습한 15종 세포 분류. 색 정규화, 패치/영역 추론, 계통 그룹, 종양 침윤·TLS 후보 공간 분석, CSV/GeoJSON 내보내기 |
 | `04_HNE2Cell_vs_CellViT.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/04_HNE2Cell_vs_CellViT.ipynb) | 같은 6개 영역에서 CellViT(PanNuke)·CellViT++(Lizard)·HNE2Cell 비교: 검출 IoU 매칭, 클래스 교차표, 공통 그룹 일치도(정답 없는 일치도 분석) |
 
+## 시각화
+
+모든 노트북은 공통 시각화 모듈 `viz.py`를 씁니다 (Colab에서는 GitHub에서 자동으로 받습니다).
+
+| 기능 | 내용 |
+|---|---|
+| 조직 사진 나란히 보기 | 원본 H&E · 윤곽선 · 반투명 채움을 같은 배율로 |
+| 인터랙티브 뷰어 (plotly) | 휠로 확대/드래그로 이동, 세포에 마우스를 올리면 타입·확신도·면적, 범례 클릭으로 타입 켜고 끄기, 버튼으로 분류 체계 전환, 여러 패널 연동 확대 |
+| 슬라이드 탐색기 (ipywidgets) | 슬라이더로 위치·크기를 골라 원본 해상도 조직 사진 + 세포 윤곽 |
+| 세포 갤러리 | 타입별 실제 세포 사진 모음, 두 모델 판정이 엇갈린 세포 모음 |
+| 분포 대시보드 | 타입별 세포 수·비율, 확신도·핵 면적·종양까지 거리 분포 |
+| 정확도 / 일치도 | 정답이 있을 때 클래스별 precision·recall·F1, 혼동행렬, 확신도-정답률 곡선 (02 Part 4) · 정답이 없을 때 타입별 모델 간 일치율 (04) |
+
+> 인터랙티브 그림과 탐색기는 Colab/Jupyter에서 실행할 때 보입니다 (GitHub 미리보기에서는 보이지 않음).
+
 ## Colab에서 실행
 
 1. 위 표의 **Open in Colab** 배지를 누릅니다.

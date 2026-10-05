@@ -65,6 +65,7 @@ def setup_cells():
 HELPERS = '''# 공통 유틸 함수
 import json, time, warnings
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 import cv2
@@ -176,6 +177,15 @@ def legend(ax, names, colors, **kw):
     from matplotlib.patches import Patch
     handles = [Patch(color=np.array(colors[i]) / 255, label=n) for i, n in names.items() if i in colors]
     ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, **kw)
+
+# 공통 시각화 도구 viz.py: 저장소에 있으면 그대로, 없으면(Colab) GitHub에서 받기
+for _d in [WORKDIR, WORKDIR.parent]:
+    if (_d / "viz.py").exists():
+        sys.path.insert(0, str(_d)); break
+else:
+    urllib.request.urlretrieve("https://raw.githubusercontent.com/fourmodern/cellvit-tutorial/main/viz.py", WORKDIR / "viz.py")
+    sys.path.insert(0, str(WORKDIR))
+import viz
 
 print("device:", DEVICE, "| torch", torch.__version__)
 if DEVICE == "cuda":
@@ -417,6 +427,66 @@ def notebook_cellvit():
             "for i, n in zip(ids, counts):\n"
             '    print(f"{NUCLEI_TYPES[i]:14s} {n:5d}  ({n / len(cells):.1%})")'
         ),
+        md(
+            "### 6-0. 타입별 분포 대시보드\n"
+            "\n"
+            "타입별 세포 수·비율과 함께, 타입마다 **모델 확신도(`type_prob`)** 와 **핵 면적** 분포를 바이올린으로 봅니다.\n"
+            "\n"
+            "- `type_prob` = 핵 안의 픽셀 중 다수결 타입이 차지한 비율. 1에 가까울수록 모델이 망설임 없이 판정한 세포입니다.\n"
+            "- 이 예제에는 정답 라벨이 없으므로 **정확도는 계산할 수 없습니다.** 확신도가 낮은 타입은 결과를 더 조심해서 해석하세요. "
+            "(정답이 있을 때의 정확도 그래프는 02 노트북 Part 4에 있습니다)"
+        ),
+        code(
+            "cell_df = pd.DataFrame({\n"
+            '    "type": [NUCLEI_TYPES[c["type"]] for c in cells],\n'
+            '    "type_prob": [c["type_prob"] for c in cells],\n'
+            '    "area_um2": [cv2.contourArea(np.asarray(c["contour"], np.float32)) * 0.25 ** 2 for c in cells],\n'
+            "})\n"
+            "viz.type_summary(cell_df, \"type\", {NUCLEI_TYPES[k]: PANNUKE_COLORS[k] for k in PANNUKE_COLORS},\n"
+            "                 order=[NUCLEI_TYPES[k] for k in PANNUKE_COLORS],\n"
+            '                 value_cols={"type_prob": "모델 확신도", "area_um2": "핵 면적 (µm²)"},\n'
+            '                 title="CellViT 세포 타입 분포 (패치 1개)")'
+        ),
+        md(
+            "### 6-1. 조직 사진과 나란히 보기\n"
+            "\n"
+            "예측을 믿기 전에 **조직 사진을 직접 보는 것**이 가장 중요합니다. 같은 영역을 원본 H&E, 윤곽선, 반투명 채움으로 나란히 놓았습니다."
+        ),
+        code(
+            "pan_color = lambda c: PANNUKE_COLORS[c[\"type\"]]\n"
+            "pan_label = lambda c: NUCLEI_TYPES[c[\"type\"]]\n"
+            "pan_items = [(NUCLEI_TYPES[k], PANNUKE_COLORS[k]) for k in PANNUKE_COLORS]\n"
+            "\n"
+            "viz.side_by_side(img, [\n"
+            '    ("윤곽선", viz.overlay(img, cells, pan_color, mode="contour"), pan_items),\n'
+            '    ("반투명 채움", viz.overlay(img, cells, pan_color, mode="fill", alpha=0.45), pan_items),\n'
+            "], crop=(slice(256, 768), slice(384, 896)))"
+        ),
+        md(
+            "### 6-2. 인터랙티브 뷰어\n"
+            "\n"
+            "- **마우스 휠**로 확대, **드래그**로 이동, **더블클릭**으로 원래 크기\n"
+            "- 세포 위에 마우스를 올리면 타입·확률·핵 면적\n"
+            "- 오른쪽 **범례를 클릭**하면 그 타입을 숨기고, **더블클릭**하면 그 타입만 봅니다\n"
+            "\n"
+            "> 인터랙티브 그림은 Colab/Jupyter에서 보입니다(GitHub 미리보기에서는 보이지 않음)."
+        ),
+        code(
+            "hover = lambda c: (f\"<b>{NUCLEI_TYPES[c['type']]}</b><br>type_prob {c['type_prob']:.2f}\"\n"
+            "                   f\"<br>핵 면적 {cv2.contourArea(np.asarray(c['contour'], np.float32)) * 0.25 ** 2:.0f} µm²\")\n"
+            "viz.interactive(img, cells, pan_color, pan_label, hover_of=hover, order=[NUCLEI_TYPES[k] for k in PANNUKE_COLORS],\n"
+            '                title="CellViT 세포 분류 (PanNuke) — 휠로 확대, 범례 클릭으로 타입 켜고 끄기")'
+        ),
+        md(
+            "### 6-3. 타입별 세포 갤러리\n"
+            "\n"
+            "각 타입으로 분류된 세포를 무작위로 잘라 모았습니다. 같은 줄의 세포들이 **형태적으로 비슷한지**, "
+            "다른 줄과 구분되는지를 보면 분류가 그럴듯한지 빠르게 판단할 수 있습니다."
+        ),
+        code(
+            "viz.cell_gallery(cells, pan_label, pan_color, order=[NUCLEI_TYPES[k] for k in PANNUKE_COLORS], img=img, n=10, size=80,\n"
+            '                 title="PanNuke 타입별 세포 (가운데 세포 윤곽 표시)")'
+        ),
         # 7. embeddings
         md(
             "## 7. Task ⑤ 세포 임베딩 추출\n"
@@ -622,6 +692,25 @@ def notebook_cellvitpp():
             "Lizard는 림프구·형질세포·호중구·호산구까지 나누고, Ocelot은 종양/비종양 2분류만 합니다. "
             "**같은 임베딩**에서 목적에 맞는 체계를 고르면 되고, 원하는 체계가 없으면 Part 4처럼 직접 학습합니다."
         ),
+        md(
+            "### 인터랙티브: 버튼으로 분류 체계 바꿔 보기\n"
+            "\n"
+            "위쪽 버튼으로 분류 체계를 바꾸면 **같은 세포 윤곽**에 색만 바뀝니다. "
+            "`조직 사진만`을 누르면 오버레이 없이 H&E만 봅니다. 휠로 확대, 범례 클릭으로 클래스 켜고 끄기."
+        ),
+        code(
+            "layers = [(\"PanNuke\", cells, lambda c: PANNUKE_COLORS[c[\"type\"]], lambda c: PANNUKE_TYPES[c[\"type\"]],\n"
+            "           lambda c: f\"PanNuke: {PANNUKE_TYPES[c['type']]}\", None)]\n"
+            "for name in [\"lizard\", \"nucls_main\", \"panoptils\", \"ocelot\"]:\n"
+            "    clf, labels = CLASSIFIERS[name]\n"
+            "    pred, conf_ = classify(clf, emb)\n"
+            "    cols_ = palette(len(labels))\n"
+            "    rel = [dict(c, type=int(t), conf=float(p)) for c, t, p in zip(cells, pred, conf_)]\n"
+            "    layers.append((name, rel, (lambda cols_: lambda c: cols_[c[\"type\"]])(cols_),\n"
+            "                   (lambda labels: lambda c: labels[c[\"type\"]])(labels),\n"
+            "                   (lambda labels, name: lambda c: f\"{name}: {labels[c['type']]}<br>확률 {c['conf']:.2f}\")(labels, name), None))\n"
+            'viz.interactive_layers(img, layers, title="같은 세포, 다른 분류 체계 (버튼으로 전환)")'
+        ),
         # Part 3
         md(
             "## Part 3. WSI 전체 추론 (CLI)\n"
@@ -699,6 +788,42 @@ def notebook_cellvitpp():
             "ax[1].barh(names, counts, color=[np.array(cols[t]) / 255 for t in LIZARD], ec=\"k\")\n"
             'ax[1].set_title("타입별 세포 수"); ax[1].invert_yaxis()\n'
             "plt.tight_layout(); plt.show()"
+        ),
+        md(
+            "### 타입별 분포와 확신도\n"
+            "\n"
+            "> ⚠️ cellvit 1.0.9에는 분류기를 쓸 때 `cells.json`의 `type_prob`가 `int()`로 잘려 **모두 0으로 저장되는 버그**가 있습니다"
+            "(`postprocessing_numpy.py`). 그래서 확신도는 `cells.pt`의 임베딩에 같은 Lizard 분류기를 다시 적용해 직접 계산합니다."
+        ),
+        code(
+            "lz_clf, _ = CLASSIFIERS[\"lizard\"]\n"
+            "lz_pred, lz_conf = classify(lz_clf, graph.x.float())\n"
+            'assert (lz_pred == wsi_types).all(), "저장된 타입과 재계산 타입이 같아야 함"\n'
+            "wsi_df = pd.DataFrame({\n"
+            '    "type": [LIZARD[t] for t in wsi_types], "confidence": lz_conf,\n'
+            '    "area_um2": [cv2.contourArea(np.asarray(c["contour"], np.float32)) * float(slide.properties["openslide.mpp-x"]) ** 2 for c in wsi_cells],\n'
+            "})\n"
+            "viz.type_summary(wsi_df, \"type\", {LIZARD[t]: cols[t] for t in LIZARD}, order=list(LIZARD.values()),\n"
+            '                 value_cols={"confidence": "분류기 확신도 (softmax 최대값)", "area_um2": "핵 면적 (µm²)"},\n'
+            '                 title="슬라이드 전체 세포 분포 (CellViT++ · Lizard)")'
+        ),
+        md(
+            "### 슬라이드 탐색\n"
+            "\n"
+            "1. **전체 분포 (인터랙티브)**: 썸네일 위의 모든 세포. 확대하면 세포 위치가 보이고, 범례로 타입을 켜고 끌 수 있습니다.\n"
+            "2. **원본 해상도 탐색기**: 슬라이더로 위치와 영역 크기를 고르면 **원본 해상도 조직 사진**과 세포 윤곽을 나란히 보여 줍니다."
+        ),
+        code(
+            "liz_names = np.array([LIZARD[t] for t in wsi_types])\n"
+            "viz.wsi_view(thumb, ds, wsi_xy, liz_names, {LIZARD[t]: cols[t] for t in LIZARD}, order=list(LIZARD.values()),\n"
+            '             title="슬라이드 전체 세포 (Lizard) — 휠로 확대", marker_size=4)'
+        ),
+        code(
+            "read_l0 = lambda x, y, w, h: np.array(slide.read_region((int(x), int(y)), 0, (int(w), int(h))).convert(\"RGB\"))\n"
+            "viz.region_explorer(read_l0, wsi_xy, wsi_cells, lambda c: cols[c[\"type\"]], lambda c: LIZARD[c[\"type\"]],\n"
+            "                    [(LIZARD[t], cols[t]) for t in LIZARD], thumb, ds,\n"
+            "                    x_range=(0, slide.dimensions[0]), y_range=(0, slide.dimensions[1]), init=(1100, 1250),\n"
+            "                    sizes=(128, 256, 512, 1024))"
         ),
         # Part 4
         md(
@@ -796,15 +921,23 @@ def notebook_cellvitpp():
             "my_clf, losses = train_classifier(X_tr, y_tr)\n"
             'print(f"학습 시간: {time.time() - t:.1f}s")\n'
             "\n"
-            "pred, _ = classify(my_clf, X_te)\n"
+            "pred, pred_conf = classify(my_clf, X_te)\n"
             "print(classification_report(y_te, pred, labels=list(NUCLS_LABELS), target_names=list(NUCLS_LABELS.values()), zero_division=0))\n"
             "\n"
-            "fig, ax = plt.subplots(1, 2, figsize=(13, 4.5))\n"
-            'ax[0].plot(losses); ax[0].set_xlabel("epoch"); ax[0].set_ylabel("train loss"); ax[0].set_title("학습 곡선")\n'
-            "ConfusionMatrixDisplay(confusion_matrix(y_te, pred, labels=list(NUCLS_LABELS)),\n"
-            '                       display_labels=list(NUCLS_LABELS.values())).plot(ax=ax[1], cmap="Blues", colorbar=False)\n'
-            'ax[1].set_title("Test confusion matrix"); ax[1].tick_params(axis="x", rotation=30)\n'
+            "fig, ax = plt.subplots(figsize=(6, 3.2))\n"
+            'ax.plot(losses); ax.set_xlabel("epoch"); ax.set_ylabel("train loss"); ax.set_title("학습 곡선")\n'
             "plt.tight_layout(); plt.show()"
+        ),
+        md(
+            "### 정확도 시각화 (test 세포 = 정답 있음)\n"
+            "\n"
+            "- **클래스별 precision / recall / F1**: 막대 아래 n은 test 세포 수. 점선은 macro-F1.\n"
+            "- **혼동행렬**: 각 정답 클래스(행)가 어떤 클래스로 예측됐는지 비율(괄호 안은 세포 수).\n"
+            "- **확신도 vs 정답률**: 모델이 확신할수록 실제로 더 맞는지. 대각선에 가까울수록 확신도를 믿을 수 있습니다."
+        ),
+        code(
+            "viz.classification_metrics(y_te.numpy(), pred, NUCLS_LABELS, cols4, title=\"직접 학습한 분류기 — NuCLS test 세포\")\n"
+            "viz.confidence_vs_accuracy(pred_conf, pred == y_te.numpy(), bins=5)"
         ),
         md(
             "### 라벨이 얼마나 필요할까?\n"
@@ -885,6 +1018,23 @@ def notebook_cellvitpp():
             '           color=[np.array(cols4[k]) / 255 for k in labels], ec="k")\n'
             'ax[1].invert_yaxis(); ax[1].set_title("타입별 세포 수")\n'
             "plt.tight_layout(); plt.show()"
+        ),
+        code(
+            "viz.type_summary(pd.DataFrame({\"type\": [labels[k] for k in wsi_pred], \"confidence\": wsi_conf}), \"type\",\n"
+            "                 {labels[k]: cols4[k] for k in labels}, order=list(labels.values()),\n"
+            '                 value_cols={"confidence": "분류기 확신도"}, title="피부 슬라이드에 적용한 NuCLS 분류기의 분포")'
+        ),
+        md(
+            "### 직접 학습한 분류기가 각 클래스로 부른 세포들\n"
+            "\n"
+            "슬라이드 전체 세포를 학습한 분류기의 클래스별로 모아, 원본 조직에서 잘라 보여 줍니다. "
+            "(정상 피부라 `Tumor`로 분류된 세포는 대부분 표피 세포일 것입니다 — 도메인 차이를 눈으로 확인)"
+        ),
+        code(
+            "my_cells = [dict(c, type=int(t)) for c, t in zip(wsi_cells, wsi_pred)]\n"
+            "viz.cell_gallery(my_cells, lambda c: labels[c[\"type\"]], lambda c: cols4[c[\"type\"]], order=list(labels.values()),\n"
+            "                 get_crop=lambda x, y, s: read_l0(x, y, s, s), n=10, size=48,\n"
+            '                 title="직접 학습한 NuCLS 분류기의 클래스별 세포 (피부 슬라이드, 20x)")'
         ),
         md(
             "## 정리\n"

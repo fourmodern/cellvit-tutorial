@@ -125,6 +125,14 @@ def cells():
             'plt.rcParams["font.family"] = fm.FontProperties(fname=str(_font)).get_name()\n'
             'plt.rcParams["axes.unicode_minus"] = False\n'
             "\n"
+            "for _d in [WORKDIR, WORKDIR.parent]:  # 공통 시각화 도구 viz.py\n"
+            '    if (_d / "viz.py").exists():\n'
+            "        sys.path.insert(0, str(_d)); break\n"
+            "else:\n"
+            '    urllib.request.urlretrieve("https://raw.githubusercontent.com/fourmodern/cellvit-tutorial/main/viz.py", WORKDIR / "viz.py")\n'
+            "    sys.path.insert(0, str(WORKDIR))\n"
+            "import viz\n"
+            "\n"
             "slide = openslide.OpenSlide(SLIDE_PATH)\n"
             'MPP = float(slide.properties["openslide.mpp-x"])\n'
             "def read_rgb(x, y, w, h):\n"
@@ -365,6 +373,25 @@ def cells():
         ),
         # detection agreement
         md(
+            "### 인터랙티브 비교 뷰어\n"
+            "\n"
+            "네 패널의 **확대·이동이 함께 움직입니다.** 한 패널에서 휠로 확대하면 나머지도 같은 위치를 보여 줍니다. "
+            "세포에 마우스를 올리면 각 모델의 판정이 보이고, 범례로 타입을 켜고 끌 수 있습니다. "
+            "`VIEW_TILE`을 바꾸면 다른 영역을 봅니다."
+        ),
+        code(
+            'VIEW_TILE = "종양-면역 경계"\n'
+            "img = TILE_IMG[VIEW_TILE]\n"
+            "viz.interactive_compare(img, [\n"
+            '    ("CellViT · PanNuke", CV[VIEW_TILE], lambda c: PANNUKE_COL[c["pannuke_id"]], lambda c: c["pannuke"],\n'
+            '     lambda c: f"CellViT: {c[\'pannuke\']}<br>Lizard: {c[\'lizard\']}", list(PANNUKE.values())),\n'
+            '    ("CellViT++ · Lizard", CV[VIEW_TILE], lambda c: LIZARD_COL[c["lizard_id"]], lambda c: c["lizard"],\n'
+            '     lambda c: f"Lizard: {c[\'lizard\']}", list(LIZARD.values())),\n'
+            '    ("HNE2Cell · 15종", HN[VIEW_TILE], lambda c: HNE_COL[c["hne_id"]], lambda c: c["hne"],\n'
+            '     lambda c: f"HNE2Cell: {c[\'hne\']} ({HNE_GROUP[c[\'hne\']]})", list(HNE.values())),\n'
+            '], title=f"{VIEW_TILE} — 확대/이동이 연동됩니다", height=560)'
+        ),
+        md(
             "## 6. 검출·분할 일치도\n"
             "\n"
             "두 모델의 핵 윤곽을 같은 1024×1024 라벨 맵에 그린 뒤, **IoU > 0.5인 쌍을 같은 세포**로 봅니다 "
@@ -395,11 +422,18 @@ def cells():
             "            out.append((i - 1, j - 1, iou, area_b[j] / area_a[i]))\n"
             "    return out\n"
             "\n"
-            "rows, MATCHED = [], []\n"
+            "rows, MATCHED, HN_ROWS, CV_ROWS = [], [], [], []\n"
             "for k in TILES:\n"
             "    m = match(CV[k], HN[k])\n"
+            "    j2i = {j: i for i, j, _, _ in m}; i2j = {i: j for i, j, _, _ in m}\n"
             "    for i, j, iou, ratio in m:\n"
-            "        MATCHED.append(dict(tile=k, pannuke=CV[k][i][\"pannuke\"], lizard=CV[k][i][\"lizard\"], hne=HN[k][j][\"hne\"], iou=iou))\n"
+            "        MATCHED.append(dict(tile=k, i=i, j=j, pannuke=CV[k][i][\"pannuke\"], lizard=CV[k][i][\"lizard\"], hne=HN[k][j][\"hne\"], iou=iou))\n"
+            "    for j, c in enumerate(HN[k]):  # HNE2Cell 세포 하나당 한 행\n"
+            "        i = j2i.get(j)\n"
+            "        HN_ROWS.append(dict(tile=k, hne=c[\"hne\"], detected=i is not None,\n"
+            "                            group_agree=np.nan if i is None else float(HNE_GROUP[c[\"hne\"]] == PANNUKE_GROUP[CV[k][i][\"pannuke\"]])))\n"
+            "    for i, c in enumerate(CV[k]):  # CellViT 세포 하나당 한 행\n"
+            "        CV_ROWS.append(dict(tile=k, pannuke=c[\"pannuke\"], detected=i in i2j))\n"
             "    rows.append(dict(영역=k, CellViT=len(CV[k]), HNE2Cell=len(HN[k]), 짝지어짐=len(m),\n"
             "                     CellViT만=len(CV[k]) - len(m), HNE2Cell만=len(HN[k]) - len(m),\n"
             "                     평균_IoU=np.mean([x[2] for x in m]) if m else np.nan,\n"
@@ -407,7 +441,7 @@ def cells():
             "det = pd.DataFrame(rows).set_index(\"영역\")\n"
             "det[\"짝 비율(CellViT 기준)\"] = det.짝지어짐 / det.CellViT\n"
             "det[\"짝 비율(HNE2Cell 기준)\"] = det.짝지어짐 / det.HNE2Cell\n"
-            "MATCHED = pd.DataFrame(MATCHED)\n"
+            "MATCHED, HN_DF, CV_DF = pd.DataFrame(MATCHED), pd.DataFrame(HN_ROWS), pd.DataFrame(CV_ROWS)\n"
             "det.round(2)"
         ),
         code(
@@ -510,6 +544,42 @@ def cells():
             "plt.tight_layout(); plt.show()"
         ),
         # composition
+        md(
+            "### 타입별 일치율\n"
+            "\n"
+            "정답이 없으므로 '정확도' 대신, **각 타입의 세포를 다른 모델도 같은 것으로 봤는지**를 타입별로 그립니다.\n"
+            "\n"
+            "- 왼쪽: 그 타입 세포 중 다른 모델도 **같은 핵을 검출**한 비율 (IoU > 0.5)\n"
+            "- 오른쪽: 짝지어진 세포 중 **같은 계통 그룹**으로 분류한 비율 (Tumor/Immune/Stromal/Epithelial/Dead)\n"
+            "- 점선은 전체 평균"
+        ),
+        code(
+            "viz.agreement_by_type(HN_DF, \"hne\", {\"detected\": \"CellViT도 검출한 비율\", \"group_agree\": \"CellViT와 계통 그룹이 같은 비율\"},\n"
+            "                      {v: HNE_COL[k] for k, v in HNE.items()}, order=list(HNE.values()),\n"
+            '                      title="HNE2Cell 타입별 — CellViT와의 일치율")\n'
+            "viz.agreement_by_type(CV_DF, \"pannuke\", {\"detected\": \"HNE2Cell도 검출한 비율\"},\n"
+            "                      {v: PANNUKE_COL[k] for k, v in PANNUKE.items()}, order=list(PANNUKE.values()),\n"
+            '                      title="CellViT(PanNuke) 타입별 — HNE2Cell과의 검출 일치율")'
+        ),
+        md(
+            "### 두 모델의 판정이 엇갈린 세포들\n"
+            "\n"
+            "계통 그룹이 다르게 나온 조합 중 많은 순으로 실제 세포 사진을 모았습니다. "
+            "줄 이름은 `HNE2Cell 판정 / CellViT 판정`입니다. 어느 쪽이 더 그럴듯한지 직접 판단해 보세요."
+        ),
+        code(
+            "dis = MATCHED[MATCHED.g_cv != MATCHED.g_hn]\n"
+            "top = (dis.hne + \" / \" + dis.pannuke).value_counts().head(6).index.tolist()\n"
+            "DIS_CELLS = []\n"
+            "for _, r in dis.iterrows():\n"
+            "    key = f\"{r.hne} / {r.pannuke}\"\n"
+            "    if key in top:\n"
+            "        tx, ty = TILES[r.tile]; c = HN[r.tile][r.j]\n"
+            "        DIS_CELLS.append(dict(centroid=c[\"centroid\"] + (tx, ty), contour=c[\"contour\"] + (tx, ty), key=key, hne_id=c[\"hne_id\"]))\n"
+            "viz.cell_gallery(DIS_CELLS, lambda c: c[\"key\"], lambda c: HNE_COL[c[\"hne_id\"]], order=top,\n"
+            "                 get_crop=lambda x, y, s: read_rgb(x, y, s, s), n=10, size=72,\n"
+            '                 title="판정이 엇갈린 세포 (HNE2Cell / CellViT, 윤곽은 HNE2Cell 색)")'
+        ),
         md(
             "## 9. 영역별 세포 조성\n"
             "\n"
