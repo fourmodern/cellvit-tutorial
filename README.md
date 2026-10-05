@@ -5,6 +5,7 @@
 | `01_CellViT_tasks.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/01_CellViT_tasks.ipynb) | CellViT의 5가지 task: 조직 분류, 세포핵 검출, 인스턴스 분할, 세포 분류(PanNuke 5종), 세포 임베딩. 마지막에 QuPath용 GeoJSON 내보내기 |
 | `02_CellViT_plusplus.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/02_CellViT_plusplus.ipynb) | CellViT++: 사전학습 분류기 7종, 같은 세포에 분류기 바꿔 끼우기, WSI 전체 추론(CLI), **점 라벨로 나만의 분류기 학습** 후 WSI에 적용 |
 | `03_HNE2Cell.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/03_HNE2Cell.ipynb) | HNE2Cell: 공간전사체 라벨로 학습한 15종 세포 분류. 색 정규화, 패치/영역 추론, 계통 그룹, 종양 침윤·TLS 후보 공간 분석, CSV/GeoJSON 내보내기 |
+| `04_HNE2Cell_vs_CellViT.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/04_HNE2Cell_vs_CellViT.ipynb) | 같은 6개 영역에서 CellViT(PanNuke)·CellViT++(Lizard)·HNE2Cell 비교: 검출 IoU 매칭, 클래스 교차표, 공통 그룹 일치도(정답 없는 일치도 분석) |
 
 ## Colab에서 실행
 

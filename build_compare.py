@@ -1,0 +1,593 @@
+"""HNE2Cell vs CellViT 비교 노트북 생성 스크립트.
+
+python build_compare.py  →  04_HNE2Cell_vs_CellViT.ipynb
+"""
+import nbformat as nbf
+
+md = nbf.v4.new_markdown_cell
+code = nbf.v4.new_code_cell
+
+REPO = "fourmodern/cellvit-tutorial"
+NB_PATH = "04_HNE2Cell_vs_CellViT.ipynb"
+
+
+def cells():
+    return [
+        md(
+            f'<a href="https://colab.research.google.com/github/{REPO}/blob/main/{NB_PATH}" target="_parent">'
+            '<img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>'
+        ),
+        md(
+            "# HNE2Cell vs CellViT: 같은 패치, 두 모델\n"
+            "\n"
+            "같은 H&E 영역을 두 모델에 넣고 **무엇이 같고 무엇이 다른지** 비교합니다.\n"
+            "\n"
+            "| | CellViT (SAM-H) | CellViT++ (Lizard 분류기) | HNE2Cell |\n"
+            "|---|---|---|---|\n"
+            "| 세포 타입 | PanNuke 5종 | Lizard 6종 | 15종 |\n"
+            "| 입력 | 원본 1024px @ 40x | (CellViT 임베딩 재사용) | Reinhard 정규화 → 256px(64px 겹침) → 224 |\n"
+            "| 정답 라벨 출처 | 병리 수작업 | 병리 수작업 | 공간전사체 |\n"
+            "\n"
+            "**비교 항목**\n"
+            "1. **검출·분할**: 두 모델의 세포핵을 IoU > 0.5로 짝짓고, 짝지어진 비율과 핵 윤곽 일치도(IoU)를 봅니다.\n"
+            "2. **클래스 대응**: 같은 세포를 각 모델이 뭐라고 불렀는지 교차표로 봅니다. "
+            "예를 들어 CellViT의 `Inflammatory`가 HNE2Cell에서 CD4 T, B, Plasma 등으로 어떻게 나뉘는지.\n"
+            "3. **공통 개념의 일치도**: 종양/면역/기질처럼 양쪽에 다 있는 개념에서 판정이 얼마나 같은지.\n"
+            "\n"
+            "> ⚠️ 이 영역들에는 **정답 라벨이 없습니다.** 아래 숫자는 정확도가 아니라 **두 모델 사이의 일치도**입니다. "
+            "어느 쪽이 맞는지는 공간전사체나 IHC 같은 독립적인 정답으로만 판단할 수 있습니다.\n"
+            "\n"
+            "예제 슬라이드: TCGA 폐 편평세포암(LUSC), 40x — HNE2Cell HuggingFace 저장소의 예제와 같은 슬라이드입니다."
+        ),
+        md(
+            "## 0. 환경 설정\n"
+            "\n"
+            "**Colab**: `런타임 → 런타임 유형 변경 → T4 GPU`. 첫 셀을 실행하면 `cellvit` 설치 후 **런타임이 자동으로 재시작**됩니다"
+            "(cellvit이 `numpy<2`를 요구). 재시작 후 처음부터 다시 실행하세요.\n"
+            "\n"
+            "필요 자원: 디스크 약 9GB (CellViT-SAM-H 2.8GB + HNE2Cell 5.1GB), GPU 메모리 약 8GB. "
+            "두 모델은 **한 번에 하나씩** GPU에 올립니다."
+        ),
+        code(
+            "import sys, os, importlib.util\n"
+            "\n"
+            'IN_COLAB = "google.colab" in sys.modules\n'
+            'if IN_COLAB and importlib.util.find_spec("cellvit") is None:\n'
+            "    !apt-get -qq install -y openslide-tools > /dev/null\n"
+            "    !pip -q install cellvit openslide-bin\n"
+            '    print("설치 완료 → 런타임을 재시작합니다. 재시작 후 처음부터 다시 실행하세요.")\n'
+            "    os.kill(os.getpid(), 9)"
+        ),
+        code(
+            "from pathlib import Path\n"
+            "\n"
+            'WORKDIR = Path("/content/compare") if IN_COLAB else Path.cwd()\n'
+            "WORKDIR.mkdir(parents=True, exist_ok=True)\n"
+            "os.chdir(WORKDIR)\n"
+            'os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]\n'
+            "\n"
+            "USE_DRIVE_CACHE = False  # True: 모델(약 8GB)을 Google Drive에 캐시해 다음 세션에서 재다운로드 방지\n"
+            "CACHE = WORKDIR\n"
+            "if IN_COLAB and USE_DRIVE_CACHE:\n"
+            "    from google.colab import drive\n"
+            '    drive.mount("/content/drive")\n'
+            '    CACHE = Path("/content/drive/MyDrive/model_cache")\n'
+            'os.environ["CELLVIT_CACHE"] = str(CACHE / "models")  # cellvit import 전에 설정\n'
+            'HF_CACHE = str(CACHE / "hne2cell_cache")\n'
+            'print("WORKDIR:", WORKDIR, "| CELLVIT_CACHE:", os.environ["CELLVIT_CACHE"], "| HF_CACHE:", HF_CACHE)'
+        ),
+        md("## 1. 모델과 데이터 받기"),
+        code(
+            "from huggingface_hub import hf_hub_download\n"
+            "from cellvit.utils.cache_models import cache_cellvit_sam_h, cache_classifier\n"
+            "\n"
+            "# CellViT-SAM-H + CellViT++ 분류기 (Zenodo)\n"
+            "CELLVIT_CKPT = cache_cellvit_sam_h()\n"
+            'LIZARD_CKPT = cache_classifier() / "sam-h" / "lizard.pth"\n'
+            "\n"
+            "# HNE2Cell 모델·코드·예제 슬라이드·정규화 기준 이미지 (HuggingFace)\n"
+            'get = lambda f: hf_hub_download("roobee79/HNE2Cell", f, cache_dir=HF_CACHE)\n'
+            'for f in ["post_processing.py", "tools.py", "config.json"]:\n'
+            "    get(f)\n"
+            'HNE_CODE = Path(get("tools.py")).parent\n'
+            "sys.path.insert(0, str(HNE_CODE))\n"
+            'SLIDE_PATH = get("TCGA-56-8628-01Z-00-DX1.AAC57164-E0F9-4DF0-87EA-5C50FB201895.svs")\n'
+            'REF_PATH = get("standard-ilc.tif")\n'
+            'HNE_CKPT = get("HNE2cell_pub_patch73_jit.pt")\n'
+            'print("CellViT:", CELLVIT_CKPT, "\\nHNE2Cell:", HNE_CKPT)'
+        ),
+        code(
+            "import json, time, gc, warnings\n"
+            "import numpy as np\n"
+            "import pandas as pd\n"
+            "import torch\n"
+            "import torch.nn.functional as F\n"
+            "import cv2\n"
+            "import matplotlib.pyplot as plt\n"
+            "import openslide, tifffile\n"
+            "from skimage import color\n"
+            "from PIL import Image\n"
+            "from torchvision import transforms\n"
+            "\n"
+            "from cellvit.utils.tools import unflatten_dict\n"
+            "from cellvit.models.cell_segmentation.cellvit_sam import CellViTSAM\n"
+            "from cellvit.models.classifier.linear_classifier import LinearClassifier\n"
+            "from post_processing import DetectionCellPostProcessor  # HNE2Cell 공식 후처리\n"
+            "\n"
+            'warnings.filterwarnings("ignore")\n'
+            'DEVICE = "cuda" if torch.cuda.is_available() else "cpu"\n'
+            "\n"
+            "import matplotlib.font_manager as fm, urllib.request\n"
+            '_font = WORKDIR / "NanumGothic-Regular.ttf"\n'
+            "if not _font.exists():\n"
+            '    urllib.request.urlretrieve("https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf", _font)\n'
+            "fm.fontManager.addfont(str(_font))\n"
+            'plt.rcParams["font.family"] = fm.FontProperties(fname=str(_font)).get_name()\n'
+            'plt.rcParams["axes.unicode_minus"] = False\n'
+            "\n"
+            "slide = openslide.OpenSlide(SLIDE_PATH)\n"
+            'MPP = float(slide.properties["openslide.mpp-x"])\n'
+            "def read_rgb(x, y, w, h):\n"
+            '    return np.array(slide.read_region((x, y), 0, (w, h)).convert("RGB"))\n'
+            'print("device:", DEVICE, "| 슬라이드", slide.dimensions, f"{MPP} µm/px")'
+        ),
+        md(
+            "### 클래스와 색\n"
+            "\n"
+            "세 분류 체계를 같은 색 논리로 칠합니다: **종양=빨강, 면역=파랑 계열, 기질=초록 계열, 상피=주황, 사멸=회색**."
+        ),
+        code(
+            'PANNUKE = {1: "Neoplastic", 2: "Inflammatory", 3: "Connective", 4: "Dead", 5: "Epithelial"}\n'
+            "PANNUKE_COL = {1: (220, 20, 20), 2: (30, 90, 255), 3: (34, 139, 34), 4: (128, 128, 128), 5: (255, 140, 0)}\n"
+            "\n"
+            'HNE = {int(k): v for k, v in json.loads((HNE_CODE / "config.json").read_text())["id2label"].items() if k != "0"}\n'
+            "HNE_COL = {1: (255, 0, 0), 2: (30, 144, 255), 3: (65, 105, 225), 4: (0, 0, 255), 5: (100, 149, 237),\n"
+            "           6: (176, 224, 230), 7: (70, 130, 180), 8: (0, 191, 255), 9: (34, 139, 34), 10: (60, 179, 113),\n"
+            "           11: (50, 205, 50), 12: (255, 140, 0), 13: (135, 206, 250), 14: (107, 142, 35), 15: (128, 128, 128)}\n"
+            "\n"
+            "# 비교를 위한 공통 계통 그룹\n"
+            'HNE_GROUP = {"Malignant": "Tumor", "CD4 T": "Immune", "CD8 T": "Immune", "B": "Immune", "Plasma": "Immune",\n'
+            '             "Macrophage": "Immune", "Myeloid": "Immune", "DC": "Immune", "Immune_Other": "Immune",\n'
+            '             "Fibroblast": "Stromal", "Endothelial": "Stromal", "Pericyte": "Stromal", "Stromal_Other": "Stromal",\n'
+            '             "Epithelial": "Epithelial", "Dead": "Dead"}\n'
+            'PANNUKE_GROUP = {"Neoplastic": "Tumor", "Inflammatory": "Immune", "Connective": "Stromal", "Epithelial": "Epithelial", "Dead": "Dead"}\n'
+            'GROUPS = ["Tumor", "Immune", "Stromal", "Epithelial", "Dead"]\n'
+            "\n"
+            "def legend(ax, items, **kw):\n"
+            "    from matplotlib.patches import Patch\n"
+            "    ax.legend(handles=[Patch(color=np.array(c) / 255, label=n) for n, c in items],\n"
+            '              loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8, **kw)\n'
+            "\n"
+            "def draw(img, cells, colors, key=\"type\", thickness=2):\n"
+            "    canvas = img.copy()\n"
+            "    for c in cells:\n"
+            "        cnt = np.round(c[\"contour\"]).astype(np.int32).reshape(-1, 1, 2)\n"
+            "        cv2.drawContours(canvas, [cnt], -1, colors.get(c[key], (0, 0, 0)), thickness)\n"
+            "    return canvas"
+        ),
+        # tiles
+        md(
+            "## 2. 비교할 영역 고르기\n"
+            "\n"
+            "조직 구성이 다른 1024×1024 px(약 260×260 µm) 영역 6곳입니다. "
+            "좌표는 HNE2Cell 공식 패치 격자(192 간격)에 맞췄습니다."
+        ),
+        code(
+            "TILE = 1024\n"
+            "TILES = {\n"
+            '    "종양": (13856, 7328),\n'
+            '    "종양-면역 경계": (17312, 4256),\n'
+            '    "림프 소포": (10400, 11936),\n'
+            '    "형질세포 풍부": (14624, 11360),\n'
+            '    "기질": (10784, 9632),\n'
+            '    "조직 가장자리": (29984, 1952),  # HNE2Cell이 대부분 Dead로 판정하는 곳\n'
+            "}\n"
+            "TILE_IMG = {k: read_rgb(x, y, TILE, TILE) for k, (x, y) in TILES.items()}\n"
+            "\n"
+            "thumb = np.array(slide.get_thumbnail((1600, 1600)).convert(\"RGB\"))\n"
+            "ds = slide.dimensions[0] / thumb.shape[1]\n"
+            "fig = plt.figure(figsize=(20, 9))\n"
+            "ax = fig.add_subplot(2, 1, 1); ax.imshow(thumb); ax.axis(\"off\")\n"
+            "for i, (k, (x, y)) in enumerate(TILES.items()):\n"
+            '    ax.add_patch(plt.Rectangle((x / ds, y / ds), TILE / ds, TILE / ds, fill=False, ec="lime", lw=2))\n'
+            '    ax.text(x / ds, y / ds - 5, str(i + 1), color="lime", fontsize=14)\n'
+            "for i, (k, im) in enumerate(TILE_IMG.items()):\n"
+            "    a = fig.add_subplot(2, 6, 7 + i); a.imshow(im); a.set_title(f\"{i + 1}. {k}\"); a.axis(\"off\")\n"
+            "plt.tight_layout(); plt.show()"
+        ),
+        # CellViT
+        md(
+            "## 3. CellViT 추론 (PanNuke 5종 + CellViT++ Lizard 분류기)\n"
+            "\n"
+            "CellViT는 **원본 이미지**를 1024×1024 그대로 받습니다. 같은 forward에서 나온 세포 임베딩에 "
+            "CellViT++ Lizard 분류기를 붙여 6종 분류도 함께 얻습니다 (01·02 노트북과 같은 방식)."
+        ),
+        code(
+            "ckpt = torch.load(CELLVIT_CKPT, map_location=\"cpu\", weights_only=False)\n"
+            'conf = unflatten_dict(ckpt["config"], ".")\n'
+            'cellvit = CellViTSAM(model_path=None, num_nuclei_classes=conf["data"]["num_nuclei_classes"],\n'
+            '                     num_tissue_classes=conf["data"]["num_tissue_classes"], vit_structure=conf["model"]["backbone"],\n'
+            '                     regression_loss=conf["model"].get("regression_loss", False))\n'
+            'cellvit.load_state_dict(ckpt["model_state_dict"]); cellvit = cellvit.eval().to(DEVICE)\n'
+            "del ckpt\n"
+            "\n"
+            "lz = torch.load(LIZARD_CKPT, map_location=\"cpu\", weights_only=False)\n"
+            'lz_conf = unflatten_dict(lz["config"], ".")\n'
+            'lizard = LinearClassifier(embed_dim=lz["model_state_dict"]["fc1.weight"].shape[1],\n'
+            '                          hidden_dim=lz_conf["model"].get("hidden_dim", 100), num_classes=lz_conf["data"]["num_classes"])\n'
+            'lizard.load_state_dict(lz["model_state_dict"]); lizard.eval()\n'
+            'LIZARD = {int(k): v for k, v in lz_conf["data"]["label_map"].items()}\n'
+            'LIZARD_COL = {0: (0, 191, 255), 1: (255, 140, 0), 2: (30, 90, 255), 3: (100, 149, 237), 4: (176, 224, 230), 5: (34, 139, 34)}\n'
+            'print("Lizard 클래스:", LIZARD)\n'
+            "\n"
+            "@torch.inference_mode()\n"
+            "def run_cellvit(img):\n"
+            "    x = torch.from_numpy(((img / 255.0 - 0.5) / 0.5).transpose(2, 0, 1)).float()[None].to(DEVICE)\n"
+            '    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=DEVICE == "cuda"):\n'
+            "        out = cellvit(x, retrieve_tokens=True)\n"
+            "    out = {k: v.float().cpu() for k, v in out.items()}\n"
+            '    pred = {"nuclei_binary_map": F.softmax(out["nuclei_binary_map"], 1),\n'
+            '            "nuclei_type_map": F.softmax(out["nuclei_type_map"], 1), "hv_map": out["hv_map"]}\n'
+            "    _, cd = cellvit.calculate_instance_map(pred, magnification=40)\n"
+            '    cells = [c for c in cd[0].values() if c["type"] != 0]\n'
+            "    # 세포 임베딩 = bbox가 덮는 토큰 평균 → Lizard 분류기\n"
+            '    tok = out["tokens"][0]\n'
+            "    embs = []\n"
+            "    for c in cells:\n"
+            '        bb = np.asarray(c["bbox"]) / 16\n'
+            "        r0, c0 = np.floor(bb[0]).astype(int); r1, c1 = np.ceil(bb[1]).astype(int)\n"
+            "        embs.append(tok[:, r0:r1, c0:c1].flatten(1).mean(1))\n"
+            "    lz_pred = lizard(torch.stack(embs)).argmax(1).numpy() if embs else []\n"
+            '    return [dict(centroid=np.asarray(c["centroid"]), contour=np.asarray(c["contour"]), pannuke=PANNUKE[c["type"]],\n'
+            '                 pannuke_id=c["type"], lizard=LIZARD[int(l)], lizard_id=int(l)) for c, l in zip(cells, lz_pred)]\n'
+            "\n"
+            "t = time.time()\n"
+            "CV = {k: run_cellvit(im) for k, im in TILE_IMG.items()}\n"
+            'print(f"CellViT {time.time() - t:.0f}s |", {k: len(v) for k, v in CV.items()})\n'
+            "\n"
+            "cellvit = None; gc.collect(); torch.cuda.empty_cache()  # GPU 비우기"
+        ),
+        # HNE2Cell
+        md(
+            "## 4. HNE2Cell 추론\n"
+            "\n"
+            "03 노트북과 같은 방식입니다: 슬라이드 전체의 LAB 통계로 **Reinhard 정규화** → 256px 패치를 **64px 겹쳐** 자르고 → "
+            "224로 축소해 추론 → 패치 가운데 192×192에 중심이 있는 세포만 남겨 중복 제거.\n"
+            "\n"
+            "각 1024 영역을 빠짐없이 덮도록 영역보다 32px 바깥부터 6×6개 패치를 자릅니다. "
+            "(슬라이드 색 통계 계산에 Colab에서 1~2분 걸립니다.)"
+        ),
+        code(
+            "def lab_stats(blocks):\n"
+            "    s, s2, n = np.zeros(3), np.zeros(3), np.zeros(3)\n"
+            "    for rgb in blocks:\n"
+            "        lab = color.rgb2lab(rgb)\n"
+            "        for c in range(3):\n"
+            "            v = lab[..., c][lab[..., c] != 0]\n"
+            "            s[c] += v.sum(); s2[c] += (v ** 2).sum(); n[c] += v.size\n"
+            "    m = s / n\n"
+            "    return m, np.sqrt(s2 / n - m ** 2)\n"
+            "\n"
+            "def tissue_blocks(img, block=128, thr=0.1):\n"
+            "    sat = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)[..., 1] / 255.0\n"
+            "    out = img.copy()\n"
+            "    for y in range(0, img.shape[0], block):\n"
+            "        for x in range(0, img.shape[1], block):\n"
+            "            if sat[y:y + block, x:x + block].mean() < thr:\n"
+            "                out[y:y + block, x:x + block] = 0\n"
+            "    return out\n"
+            "\n"
+            "ref = tifffile.imread(REF_PATH)\n"
+            "REF_MEAN, REF_STD = lab_stats(ref[i:i + 1024] for i in range(0, ref.shape[0], 1024)); del ref\n"
+            "W, H = slide.dimensions; Wc, Hc = W // 128 * 128, H // 128 * 128\n"
+            "def slide_tiles(t=2048):\n"
+            "    for y in range(0, Hc, t):\n"
+            "        for x in range(0, Wc, t):\n"
+            "            im = tissue_blocks(read_rgb(x, y, min(t, Wc - x), min(t, Hc - y)))\n"
+            "            if im.any():\n"
+            "                yield im\n"
+            "t = time.time()\n"
+            "SRC_MEAN, SRC_STD = lab_stats(slide_tiles())\n"
+            'print(f"색 통계 {time.time() - t:.0f}s | slide", SRC_MEAN.round(2), SRC_STD.round(2))\n'
+            "\n"
+            "def reinhard(rgb):\n"
+            "    lab = (color.rgb2lab(rgb) - SRC_MEAN) * (REF_STD / SRC_STD) + REF_MEAN\n"
+            "    out = (np.clip(color.lab2rgb(lab), 0, 1) * 255).astype(np.uint8)\n"
+            "    out[tissue_blocks(rgb).max(-1) == 0] = 255\n"
+            "    return out"
+        ),
+        code(
+            "hne = torch.jit.load(HNE_CKPT, map_location=DEVICE).eval()\n"
+            "TRANSFORM = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(),\n"
+            "                                transforms.Normalize([0.707223, 0.578729, 0.703617], [0.211883, 0.230117, 0.177517])])\n"
+            "\n"
+            "@torch.inference_mode()\n"
+            "def run_hne2cell(x0, y0, batch=12):\n"
+            '    """1024 영역 (x0, y0)을 겹친 256 패치로 덮어 추론 → 영역 좌표계의 세포 리스트"""\n'
+            "    starts = [-32 + 192 * k for k in range(6)]  # -32 ~ 928 → 영역 전체 + 바깥 32px\n"
+            "    jobs = [(dx, dy) for dy in starts for dx in starts]\n"
+            "    cells = []\n"
+            "    for b in range(0, len(jobs), batch):\n"
+            "        bj = jobs[b:b + batch]\n"
+            "        imgs = [reinhard(read_rgb(x0 + dx, y0 + dy, 256, 256)) for dx, dy in bj]\n"
+            "        x = torch.stack([TRANSFORM(Image.fromarray(i)) for i in imgs]).to(DEVICE)\n"
+            '        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=DEVICE == "cuda"):\n'
+            "            out = {k: v.float().cpu() for k, v in hne(x).items()}\n"
+            "        for i, (dx, dy) in enumerate(bj):\n"
+            '            pm = np.concatenate([out["tissue_type_map"][i].argmax(0)[..., None].numpy(),\n'
+            '                                 out["cell_type_map"][i].argmax(0)[..., None].numpy(),\n'
+            '                                 out["nuclei_binary_map"][i].argmax(0)[..., None].numpy(),\n'
+            '                                 out["hv_map"][i].permute(1, 2, 0).numpy()], -1)\n'
+            "            _, cd = DetectionCellPostProcessor(nr_types=16, magnification=40).post_process_cell_segmentation(pm)\n"
+            "            for c in cd.values():\n"
+            '                cx, cy = c["centroid"]\n'
+            '                if c["type"] == 0 or not (32 <= cx < 224 and 32 <= cy < 224):  # 패치 가운데만\n'
+            "                    continue\n"
+            "                gx, gy = cx + dx, cy + dy\n"
+            "                if 0 <= gx < TILE and 0 <= gy < TILE:\n"
+            '                    cells.append(dict(centroid=np.array([gx, gy]), contour=np.asarray(c["contour"]) + (dx, dy),\n'
+            '                                      hne=HNE[c["type"]], hne_id=c["type"]))\n'
+            "    return cells\n"
+            "\n"
+            "t = time.time()\n"
+            "HN = {k: run_hne2cell(x, y) for k, (x, y) in TILES.items()}\n"
+            'print(f"HNE2Cell {time.time() - t:.0f}s |", {k: len(v) for k, v in HN.items()})\n'
+            "hne = None; gc.collect(); torch.cuda.empty_cache()"
+        ),
+        # visual
+        md(
+            "## 5. 나란히 보기\n"
+            "\n"
+            "각 영역의 가운데 512×512를 확대했습니다. 왼쪽부터 H&E, CellViT(PanNuke 5종), CellViT++(Lizard 6종), HNE2Cell(15종)."
+        ),
+        code(
+            "crop = (slice(256, 768), slice(256, 768))\n"
+            "def in_crop(c):\n"
+            '    x, y = c["centroid"]; return 256 <= x < 768 and 256 <= y < 768\n'
+            "def shift(cs):\n"
+            '    return [dict(c, contour=c["contour"] - 256) for c in cs if in_crop(c)]\n'
+            "\n"
+            "fig, ax = plt.subplots(len(TILES), 4, figsize=(22, 5.4 * len(TILES)))\n"
+            "for r, k in enumerate(TILES):\n"
+            "    img = TILE_IMG[k][crop]\n"
+            "    cv_c, hn_c = shift(CV[k]), shift(HN[k])\n"
+            '    ax[r, 0].imshow(img); ax[r, 0].set_ylabel(k, fontsize=14)\n'
+            '    ax[r, 1].imshow(draw(img, cv_c, PANNUKE_COL, "pannuke_id"))\n'
+            '    ax[r, 2].imshow(draw(img, cv_c, LIZARD_COL, "lizard_id"))\n'
+            '    ax[r, 3].imshow(draw(img, hn_c, HNE_COL, "hne_id"))\n'
+            "    for a in ax[r]: a.set_xticks([]); a.set_yticks([])\n"
+            '    legend(ax[r, 3], [(HNE[t], HNE_COL[t]) for t in sorted({c["hne_id"] for c in hn_c})])\n'
+            'for a, t in zip(ax[0], ["H&E", "CellViT · PanNuke", "CellViT++ · Lizard", "HNE2Cell · 15종"]):\n'
+            "    a.set_title(t, fontsize=14)\n"
+            "legend(ax[0, 1], [(PANNUKE[t], PANNUKE_COL[t]) for t in PANNUKE])\n"
+            "legend(ax[0, 2], [(LIZARD[t], LIZARD_COL[t]) for t in LIZARD])\n"
+            "plt.tight_layout(); plt.show()"
+        ),
+        # detection agreement
+        md(
+            "## 6. 검출·분할 일치도\n"
+            "\n"
+            "두 모델의 핵 윤곽을 같은 1024×1024 라벨 맵에 그린 뒤, **IoU > 0.5인 쌍을 같은 세포**로 봅니다 "
+            "(IoU > 0.5이면 짝이 하나로 정해집니다).\n"
+            "\n"
+            "- `CellViT만` / `HNE2Cell만`: 다른 모델에 짝이 없는 핵\n"
+            "- `평균 IoU`: 짝지어진 핵의 윤곽 겹침 정도\n"
+            "- `면적비`: HNE2Cell 핵 면적 ÷ CellViT 핵 면적 (중앙값)"
+        ),
+        code(
+            "def label_map(cells):\n"
+            "    m = np.zeros((TILE, TILE), np.int32)\n"
+            "    for i, c in enumerate(cells, 1):\n"
+            "        cv2.fillPoly(m, [np.round(c[\"contour\"]).astype(np.int32)], i)\n"
+            "    return m\n"
+            "\n"
+            "def match(a_cells, b_cells):\n"
+            '    """IoU > 0.5 매칭 → [(i_a, i_b, iou)]"""\n'
+            "    A, B = label_map(a_cells), label_map(b_cells)\n"
+            "    both = (A > 0) & (B > 0)\n"
+            "    pairs, inter = np.unique(np.stack([A[both], B[both]]), axis=1, return_counts=True)\n"
+            "    area_a = np.bincount(A.ravel(), minlength=len(a_cells) + 1)\n"
+            "    area_b = np.bincount(B.ravel(), minlength=len(b_cells) + 1)\n"
+            "    out = []\n"
+            "    for (i, j), n in zip(pairs.T, inter):\n"
+            "        iou = n / (area_a[i] + area_b[j] - n)\n"
+            "        if iou > 0.5:\n"
+            "            out.append((i - 1, j - 1, iou, area_b[j] / area_a[i]))\n"
+            "    return out\n"
+            "\n"
+            "rows, MATCHED = [], []\n"
+            "for k in TILES:\n"
+            "    m = match(CV[k], HN[k])\n"
+            "    for i, j, iou, ratio in m:\n"
+            "        MATCHED.append(dict(tile=k, pannuke=CV[k][i][\"pannuke\"], lizard=CV[k][i][\"lizard\"], hne=HN[k][j][\"hne\"], iou=iou))\n"
+            "    rows.append(dict(영역=k, CellViT=len(CV[k]), HNE2Cell=len(HN[k]), 짝지어짐=len(m),\n"
+            "                     CellViT만=len(CV[k]) - len(m), HNE2Cell만=len(HN[k]) - len(m),\n"
+            "                     평균_IoU=np.mean([x[2] for x in m]) if m else np.nan,\n"
+            "                     면적비=np.median([x[3] for x in m]) if m else np.nan))\n"
+            "det = pd.DataFrame(rows).set_index(\"영역\")\n"
+            "det[\"짝 비율(CellViT 기준)\"] = det.짝지어짐 / det.CellViT\n"
+            "det[\"짝 비율(HNE2Cell 기준)\"] = det.짝지어짐 / det.HNE2Cell\n"
+            "MATCHED = pd.DataFrame(MATCHED)\n"
+            "det.round(2)"
+        ),
+        code(
+            "fig, ax = plt.subplots(figsize=(12, 4.5))\n"
+            "x = np.arange(len(det))\n"
+            "ax.bar(x - 0.27, det.CellViT만, 0.27, label=\"CellViT만\", color=\"#999\")\n"
+            "ax.bar(x, det.짝지어짐, 0.27, label=\"두 모델 모두 (IoU>0.5)\", color=\"#2a6\")\n"
+            "ax.bar(x + 0.27, det.HNE2Cell만, 0.27, label=\"HNE2Cell만\", color=\"#c84\")\n"
+            "ax.set_xticks(x); ax.set_xticklabels(det.index); ax.set_ylabel(\"핵 수\"); ax.legend()\n"
+            "ax.set_title(\"영역별 검출 일치\")\n"
+            "plt.tight_layout(); plt.show()"
+        ),
+        # class correspondence
+        md(
+            "## 7. 클래스 대응: 같은 세포를 각자 뭐라고 불렀나\n"
+            "\n"
+            "짝지어진 세포만으로 교차표를 만들었습니다. 각 **행(HNE2Cell 타입)을 100%로** 정규화해서, "
+            "HNE2Cell의 한 타입이 CellViT에서 어떤 클래스로 불렸는지 보여 줍니다."
+        ),
+        code(
+            "def crosstab_plot(ax, rows, cols, row_order, col_order, title):\n"
+            "    ct = pd.crosstab(rows, cols).reindex(index=row_order, columns=col_order, fill_value=0)\n"
+            "    n = ct.sum(1)\n"
+            "    pct = ct.div(n.replace(0, np.nan), axis=0)\n"
+            '    im = ax.imshow(pct.values, cmap="Blues", vmin=0, vmax=1, aspect="auto")\n'
+            "    for i in range(pct.shape[0]):\n"
+            "        for j in range(pct.shape[1]):\n"
+            "            v = pct.values[i, j]\n"
+            "            if v >= 0.05:\n"
+            '                ax.text(j, i, f"{v:.0%}", ha="center", va="center", color="w" if v > 0.6 else "k", fontsize=9)\n'
+            "    ax.set_xticks(range(len(col_order))); ax.set_xticklabels(col_order, rotation=30, ha=\"right\")\n"
+            '    ax.set_yticks(range(len(row_order))); ax.set_yticklabels([f"{r} (n={n[r]})" for r in row_order])\n'
+            "    ax.set_title(title)\n"
+            "    return im\n"
+            "\n"
+            "hne_order = [HNE[k] for k in range(1, 16) if (MATCHED.hne == HNE[k]).any()]\n"
+            "fig, ax = plt.subplots(1, 2, figsize=(18, 8))\n"
+            'crosstab_plot(ax[0], MATCHED.hne, MATCHED.pannuke, hne_order, list(PANNUKE.values()), "HNE2Cell → CellViT (PanNuke)")\n'
+            'im = crosstab_plot(ax[1], MATCHED.hne, MATCHED.lizard, hne_order, list(LIZARD.values()), "HNE2Cell → CellViT++ (Lizard)")\n'
+            "plt.colorbar(im, ax=ax, fraction=0.02, label=\"행 기준 비율\")\n"
+            "plt.show()"
+        ),
+        md(
+            "**읽는 법**: 예를 들어 `B` 행에서 PanNuke `Inflammatory`가 높고 Lizard `Lymphocyte`가 높다면, "
+            "CellViT가 한 덩어리로 부르던 '염증/림프구'를 HNE2Cell은 B세포로 더 세분했다는 뜻입니다. "
+            "반대로 `Malignant` 행이 `Neoplastic`이 아닌 다른 클래스로 많이 가 있다면 두 모델의 종양 판단이 엇갈리는 지점입니다."
+        ),
+        # agreement on shared concepts
+        md(
+            "## 8. 공통 개념에서의 일치도\n"
+            "\n"
+            "두 체계를 공통 계통 그룹으로 맞춘 뒤 일치율과 Cohen's κ(우연 일치를 뺀 일치도)를 계산합니다.\n"
+            "\n"
+            "| 공통 그룹 | CellViT (PanNuke) | HNE2Cell |\n"
+            "|---|---|---|\n"
+            "| Tumor | Neoplastic | Malignant |\n"
+            "| Immune | Inflammatory | CD4 T, CD8 T, B, Plasma, Macrophage, Myeloid, DC, Immune_Other |\n"
+            "| Stromal | Connective | Fibroblast, Endothelial, Pericyte, Stromal_Other |\n"
+            "| Epithelial | Epithelial | Epithelial |\n"
+            "| Dead | Dead | Dead |\n"
+            "\n"
+            "Lizard와는 양쪽에 모두 있는 **형질세포(Plasma)** 와 **림프구(Lymphocyte ↔ CD4 T + CD8 T + B)** 를 따로 봅니다."
+        ),
+        code(
+            "from sklearn.metrics import cohen_kappa_score\n"
+            "\n"
+            "MATCHED[\"g_cv\"] = MATCHED.pannuke.map(PANNUKE_GROUP)\n"
+            "MATCHED[\"g_hn\"] = MATCHED.hne.map(HNE_GROUP)\n"
+            "\n"
+            "def agree(d):\n"
+            "    return pd.Series({\"짝지어진 세포\": len(d), \"그룹 일치율\": (d.g_cv == d.g_hn).mean(),\n"
+            '                      "Cohen κ": cohen_kappa_score(d.g_cv, d.g_hn) if d.g_cv.nunique() > 1 or d.g_hn.nunique() > 1 else np.nan})\n'
+            "\n"
+            "summary = MATCHED.groupby(\"tile\", sort=False).apply(agree)\n"
+            "summary.loc[\"전체\"] = agree(MATCHED)\n"
+            "print(summary.round(3))\n"
+            "\n"
+            "fig, ax = plt.subplots(1, 2, figsize=(16, 6))\n"
+            'crosstab_plot(ax[0], MATCHED.g_hn, MATCHED.g_cv, GROUPS, GROUPS, "공통 그룹: HNE2Cell(행) → CellViT(열), 전체 영역")\n'
+            "ax[0].set_xlabel(\"CellViT (PanNuke)\"); ax[0].set_ylabel(\"HNE2Cell\")\n"
+            "\n"
+            "# Lizard 공통 클래스\n"
+            'lym = MATCHED.hne.isin(["CD4 T", "CD8 T", "B"]); lz_lym = MATCHED.lizard == "Lymphocyte"\n'
+            'pla = MATCHED.hne == "Plasma"; lz_pla = MATCHED.lizard == "Plasma"\n'
+            "def pr(a, b):  # a를 기준으로 b와 겹치는 정도\n"
+            "    both = (a & b).sum()\n"
+            "    return both / max(a.sum(), 1), both / max(b.sum(), 1)\n"
+            "rows = []\n"
+            'for name, a, b in [("림프구", lym, lz_lym), ("형질세포", pla, lz_pla)]:\n'
+            "    p, q = pr(a, b)\n"
+            '    rows.append((name, int(a.sum()), int(b.sum()), int((a & b).sum()), p, q))\n'
+            'lz_tab = pd.DataFrame(rows, columns=["개념", "HNE2Cell", "Lizard", "둘 다", "HNE2Cell 중 Lizard도 동의", "Lizard 중 HNE2Cell도 동의"]).set_index("개념")\n'
+            "print(\"\\n\", lz_tab.round(2))\n"
+            "\n"
+            "x = np.arange(len(summary))\n"
+            "ax[1].bar(x - 0.2, summary[\"그룹 일치율\"], 0.4, label=\"일치율\", color=\"#4a8\")\n"
+            "ax[1].bar(x + 0.2, summary[\"Cohen κ\"], 0.4, label=\"Cohen kappa\", color=\"#48c\")\n"
+            "ax[1].set_xticks(x); ax[1].set_xticklabels(summary.index, rotation=20); ax[1].set_ylim(0, 1); ax[1].legend()\n"
+            'ax[1].set_title("영역별 공통 그룹 일치도"); ax[1].grid(axis="y", alpha=0.3)\n'
+            "plt.tight_layout(); plt.show()"
+        ),
+        # composition
+        md(
+            "## 9. 영역별 세포 조성\n"
+            "\n"
+            "짝 여부와 상관없이 각 모델이 검출한 모든 세포의 조성입니다. "
+            "같은 영역을 PanNuke 5종으로 보면 단순한 구성이, HNE2Cell 15종으로 보면 면역·기질 세포의 세부 구성이 드러납니다."
+        ),
+        code(
+            "fig, ax = plt.subplots(1, 2, figsize=(20, 6))\n"
+            "comp_cv = pd.DataFrame({k: pd.Series([c[\"pannuke\"] for c in CV[k]]).value_counts(normalize=True) for k in TILES}).T.reindex(columns=list(PANNUKE.values())).fillna(0)\n"
+            "comp_cv.plot.barh(stacked=True, ax=ax[0], color=[np.array(PANNUKE_COL[i]) / 255 for i in PANNUKE], width=0.8, legend=False)\n"
+            "ax[0].set_title(\"CellViT (PanNuke 5종)\"); ax[0].invert_yaxis(); ax[0].set_xlim(0, 1)\n"
+            "legend(ax[0], [(PANNUKE[i], PANNUKE_COL[i]) for i in PANNUKE])\n"
+            "comp_hn = pd.DataFrame({k: pd.Series([c[\"hne\"] for c in HN[k]]).value_counts(normalize=True) for k in TILES}).T.reindex(columns=list(HNE.values())).fillna(0)\n"
+            "comp_hn.plot.barh(stacked=True, ax=ax[1], color=[np.array(HNE_COL[i]) / 255 for i in HNE], width=0.8, legend=False)\n"
+            "ax[1].set_title(\"HNE2Cell (15종)\"); ax[1].invert_yaxis(); ax[1].set_xlim(0, 1); ax[1].set_yticklabels([])\n"
+            "legend(ax[1], [(HNE[i], HNE_COL[i]) for i in HNE])\n"
+            "plt.tight_layout(); plt.show()"
+        ),
+        md(
+            "## 이 예제에서 관찰된 점\n"
+            "\n"
+            "아래는 이 슬라이드의 6개 영역에서 나온 결과입니다(GPU·버전에 따라 숫자는 조금 달라질 수 있습니다).\n"
+            "\n"
+            "**검출·분할은 대체로 일치**\n"
+            "- CellViT 핵의 57~95%가 HNE2Cell 핵과 IoU > 0.5로 짝지어지고, 짝지어진 핵의 평균 IoU는 0.71~0.81입니다.\n"
+            "- 림프 소포처럼 핵이 또렷한 곳은 95%까지 일치하고, 기질처럼 핵이 길쭉하고 흐린 곳은 57%로 낮습니다.\n"
+            "- HNE2Cell 핵이 CellViT보다 10~20% 크게 그려지고(면적비 1.08~1.21), 대부분의 영역에서 핵을 조금 더 많이 찾습니다.\n"
+            "\n"
+            "**분류가 잘 맞는 곳**\n"
+            "- HNE2Cell `Malignant`의 96%를 CellViT도 `Neoplastic`이라고 부릅니다.\n"
+            "- HNE2Cell `B`(97%)와 `CD4 T`(90%)는 CellViT에서 `Inflammatory`, Lizard에서 `Lymphocyte`입니다. "
+            "즉 CellViT의 '염증세포' 한 칸을 HNE2Cell은 B/T 세포로 나눠 줍니다.\n"
+            "\n"
+            "**분류가 엇갈리는 곳**\n"
+            "- HNE2Cell `Macrophage`의 약 80%, `Epithelial`의 약 84%를 CellViT는 `Neoplastic`이라고 부릅니다. "
+            "그래서 **종양-면역 경계** 영역의 그룹 일치율이 약 31%로 가장 낮습니다.\n"
+            "- HNE2Cell `Dead`의 약 60%는 CellViT에서 `Connective`입니다. **조직 가장자리** 영역은 HNE2Cell이 거의 전부 `Dead`로, "
+            "CellViT는 `Connective`로 보아 일치율이 5% 수준입니다.\n"
+            "- **형질세포**는 양쪽 모두 클래스가 있는데도 HNE2Cell `Plasma`와 Lizard `Plasma`가 겹치는 비율이 30~40%에 그칩니다. "
+            "CellViT(PanNuke)는 HNE2Cell `Plasma`의 절반 가까이를 `Connective`로 부릅니다.\n"
+            "- 전체 공통 그룹 일치율은 약 72%, Cohen κ는 약 0.54 (보통 수준의 일치)입니다.\n"
+            "\n"
+            "이 차이들은 **어느 모델이 틀렸다는 뜻이 아닙니다.** 대식세포·정상 상피·사멸 세포·형질세포는 H&E 형태만으로 "
+            "판단이 어려운 세포들이고, 두 모델은 서로 다른 정답(병리 판독 vs 공간전사체)으로 학습되었습니다. "
+            "실제 연구에 쓰기 전에, 엇갈리는 클래스는 해당 조직의 IHC나 공간전사체로 확인하는 것이 좋습니다."
+        ),
+        md(
+            "## 정리\n"
+            "\n"
+            "위 결과를 보며 확인할 점:\n"
+            "\n"
+            "- **검출·분할**: 두 모델은 같은 CellViT식 디코더와 watershed 후처리를 쓰므로 핵 검출은 대체로 겹칩니다. "
+            "차이는 주로 작거나 흐린 핵, 겹친 핵의 분리, 입력 정규화(원본 vs Reinhard)와 해상도(1024 직접 vs 256→224)에서 옵니다.\n"
+            "- **분류 체계**: CellViT의 `Inflammatory`/`Connective` 한 칸이 HNE2Cell에서 여러 세부 타입으로 나뉩니다. "
+            "이 세분화가 HNE2Cell의 주된 추가 정보입니다.\n"
+            "- **엇갈리는 지점**: 종양 vs 상피, 사멸 vs 작은 림프구처럼 형태가 비슷한 경우 두 모델의 판정이 갈립니다. "
+            "어느 쪽이 맞는지는 정답(공간전사체, IHC, 병리 판독) 없이는 알 수 없습니다.\n"
+            "\n"
+            "**다음 단계**: 공간전사체(Xenium 등)나 IHC가 함께 있는 슬라이드가 있다면, 같은 비교 코드에 정답을 세 번째 열로 넣어 "
+            "두 모델의 **정확도**를 직접 비교할 수 있습니다.\n"
+            "\n"
+            "**라이선스**: CellViT 코드·가중치는 Apache 2.0 + Commons Clause, HNE2Cell 가중치는 CC BY-NC 4.0. 둘 다 상업적 이용 제한."
+        ),
+    ]
+
+
+def build():
+    nb = nbf.v4.new_notebook()
+    nb.cells = cells()
+    nb.metadata = {
+        "accelerator": "GPU",
+        "colab": {"gpuType": "T4", "provenance": []},
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python"},
+    }
+    nbf.write(nb, NB_PATH)
+    print("wrote", NB_PATH)
+
+
+if __name__ == "__main__":
+    build()
