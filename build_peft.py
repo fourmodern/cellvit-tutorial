@@ -1,0 +1,575 @@
+"""Foundation model 미세조정 튜토리얼 (Adapter / LoRA-PEFT) 노트북 생성 스크립트.
+
+python build_peft.py  →  08_PEFT_finetuning.ipynb
+"""
+import textwrap
+
+import nbformat as nbf
+
+REPO = "fourmodern/cellvit-tutorial"
+NB = "08_PEFT_finetuning.ipynb"
+
+
+def md(t):
+    return nbf.v4.new_markdown_cell(textwrap.dedent(t).strip())
+
+
+def code(t):
+    return nbf.v4.new_code_cell(textwrap.dedent(t).strip())
+
+
+C = []
+C.append(md(f'<a href="https://colab.research.google.com/github/{REPO}/blob/main/{NB}" target="_parent">'
+            '<img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>'))
+C.append(md(r'''
+# 병리 foundation model 미세조정: Adapter와 LoRA (PEFT)
+
+05~07 노트북에서는 foundation model을 **고정(frozen)** 한 채 임베딩 위에 선형 분류기만 얹었습니다.
+과제가 어려워지면 모델 자체를 과제에 맞게 조금 바꿔 주는 **미세조정(fine-tuning)** 이 도움이 됩니다.
+하지만 수억~수십억 개 파라미터를 전부 학습하는 것은 GPU 메모리·시간·데이터 모두 부담이 큽니다.
+
+**PEFT (Parameter-Efficient Fine-Tuning)**: 원래 가중치는 그대로 두고 **아주 작은 추가 모듈만** 학습하는 방법들입니다.
+
+```
+              ┌──────────────────────── 고정 (학습 안 함) ────────────────────────┐
+  패치 ─►     │  ViT 블록 × 24                                                     │ ─► 임베딩 ─► 분류 헤드
+              └───────────────────────────────────────────────────────────────────┘
+  (1) 선형 분류기     : 분류 헤드만 학습 (로지스틱 회귀)
+  (2) Adapter 헤드    : 고정 임베딩 위에 작은 MLP를 학습
+  (3) Bottleneck Adapter : 각 블록 안에 '축소→확대' 작은 층을 끼워 넣고 그것만 학습 (Houlsby 등, 2019)
+  (4) LoRA            : attention 가중치 W 옆에 저차원 행렬 B·A를 더해 W + B·A 로 바꾸고 B, A만 학습 (Hu 등, 2021)
+```
+
+| 방식 | 모델 내부를 바꾸나 | 학습 파라미터 | 역전파 | 특징 |
+|---|---|---|---|---|
+| (1) 선형 분류기 | ✗ | 수천 개 | ✗ | 가장 빠름, 임베딩 한 번만 추출 |
+| (2) Adapter 헤드 | ✗ | 수십만 개 | ✗ (헤드만) | 비선형 결합, 여전히 빠름 |
+| (3) Bottleneck Adapter | ✓ | 수백만 개 (~1%) | ✓ | 블록마다 과제 맞춤 변환 |
+| (4) LoRA (`peft`) | ✓ | 약 백만 개 (~0.2%) | ✓ | 추론 시 원래 가중치에 **합칠 수 있어** 속도 손실 없음 |
+
+### 과제: PatchCamelyon (림프절 전이 검출)
+림프절 조직 패치(96×96 px, 약 1 µm/px)에서 **유방암 전이 여부**를 맞히는 이진 분류입니다 (Veeling et al. 2018, CC0).
+학습·평가 패치가 **서로 다른 슬라이드**에서 나와 일반화를 볼 수 있고, 고정 임베딩만으로는 100%가 나오지 않아 미세조정 효과를 볼 수 있습니다.
+
+> 05~07의 대장 조직 데이터는 고정 임베딩만으로 거의 100%라서 미세조정의 효과를 보여줄 수 없습니다.
+'''))
+C.append(md(r'''
+## 0. 준비
+
+- **Colab**: `런타임 → 런타임 유형 변경 → T4 GPU` (재시작 필요 없음)
+- 사용할 모델의 HuggingFace 접근 승인 + Colab 보안 비밀 `HF_TOKEN` (05~07 노트북 참고)
+- 소요 시간 (T4, 기본 설정 UNI-2·학습 2,000장): 전체 약 25~35분
+'''))
+C.append(code(r'''
+import sys, os, importlib.util
+from pathlib import Path
+
+IN_COLAB = "google.colab" in sys.modules
+need = [m for m in ["peft", "timm", "pyarrow"] if importlib.util.find_spec(m) is None]
+if need or IN_COLAB:
+    !pip -q install -U "timm>=1.0.9" "peft>=0.11" pyarrow
+
+WORKDIR = Path("/content/peft_tutorial") if IN_COLAB else Path.cwd()
+WORKDIR.mkdir(parents=True, exist_ok=True)
+os.chdir(WORKDIR)
+DATA = WORKDIR / "fm_data"; DATA.mkdir(exist_ok=True)
+
+from huggingface_hub import login, whoami
+try:
+    user = whoami()["name"]
+except Exception:
+    token = None
+    if IN_COLAB:
+        try:
+            from google.colab import userdata
+            token = userdata.get("HF_TOKEN")
+        except Exception:
+            pass
+    login(token=token) if token else login()
+    user = whoami()["name"]
+print("WORKDIR:", WORKDIR, "| HuggingFace:", user)
+'''))
+C.append(code(r'''
+import io, json, time, gc, copy, warnings, urllib.request
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from PIL import Image
+from torchvision import transforms
+
+warnings.filterwarnings("ignore")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+torch.manual_seed(0)
+
+import matplotlib.font_manager as fm
+_font = WORKDIR / "NanumGothic-Regular.ttf"
+if not _font.exists():
+    urllib.request.urlretrieve("https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf", _font)
+fm.fontManager.addfont(str(_font))
+plt.rcParams["font.family"] = fm.FontProperties(fname=str(_font)).get_name()
+plt.rcParams["axes.unicode_minus"] = False
+
+for _d in [WORKDIR, WORKDIR.parent]:  # 공통 시각화 도구 viz.py
+    if (_d / "viz.py").exists():
+        sys.path.insert(0, str(_d)); break
+else:
+    urllib.request.urlretrieve("https://raw.githubusercontent.com/fourmodern/cellvit-tutorial/main/viz.py", WORKDIR / "viz.py")
+    sys.path.insert(0, str(WORKDIR))
+import viz
+print("device:", DEVICE, "| torch", torch.__version__)
+'''))
+
+# ── 1. data
+C.append(md(r'''
+## 1. 데이터: PatchCamelyon
+
+HuggingFace(`1aurent/PatchCamelyon`, CC0)에서 학습 파일 1개(약 2만 장)와 평가 파일 1개(약 1.6만 장)만 받아 일부를 씁니다.
+
+| 세트 | 출처 | 기본 장수 | 용도 |
+|---|---|---|---|
+| 학습 | train 파일 | `N_TRAIN` = 2,000 (클래스당 절반) | 모델 학습 |
+| 검증 | train 파일 (학습과 겹치지 않게) | 1,000 | 학습 중 성능 확인 |
+| 평가 | **test 파일 (다른 슬라이드)** | 4,000 | 최종 비교 — 학습에 전혀 쓰지 않음 |
+'''))
+C.append(code(r'''
+import pyarrow.parquet as pq
+from huggingface_hub import hf_hub_download
+
+N_TRAIN, N_VAL, N_TEST = 2000, 1000, 4000
+REPO_ID = "1aurent/PatchCamelyon"
+f_tr = hf_hub_download(REPO_ID, "data/train-00000-of-00013-4717c3cf92578c96.parquet", repo_type="dataset", cache_dir=str(DATA))
+f_te = hf_hub_download(REPO_ID, "data/test-00000-of-00002-bb04e6313f58efa0.parquet", repo_type="dataset", cache_dir=str(DATA))
+
+rng = np.random.default_rng(0)
+def sample(path, sizes):
+    # 파일에서 클래스 균형을 맞춰 겹치지 않는 묶음 여러 개를 뽑는다
+    t = pq.read_table(path)
+    lab = np.array(t.column("label").to_pylist(), int)
+    pools = {c: rng.permutation(np.flatnonzero(lab == c)) for c in (0, 1)}
+    imgs, out, start = t.column("image").to_pylist(), [], {0: 0, 1: 0}
+    for n in sizes:
+        idx = []
+        for c in (0, 1):
+            idx += list(pools[c][start[c]:start[c] + n // 2]); start[c] += n // 2
+        idx = rng.permutation(idx)
+        out.append(([np.array(Image.open(io.BytesIO(imgs[i]["bytes"])).convert("RGB")) for i in idx], lab[idx]))
+    return out
+
+(Xtr, ytr), (Xva, yva) = sample(f_tr, [N_TRAIN, N_VAL])
+(Xte, yte), = sample(f_te, [N_TEST])
+CLASS = {0: "정상", 1: "전이(종양)"}
+print(f"학습 {len(Xtr)} · 검증 {len(Xva)} · 평가 {len(Xte)} | 패치 크기 {Xtr[0].shape}")
+
+ex = [Xtr[i] for c in (0, 1) for i in np.flatnonzero(ytr == c)[:10]]
+viz.image_grid(ex, ncols=10, size=1.3, row_labels=[CLASS[0], CLASS[1]], suptitle="PatchCamelyon 예시 (96×96 px, 가운데 32×32 영역에 종양이 있으면 '전이')")
+'''))
+
+# ── 2. model
+C.append(md(r'''
+## 2. 모델 불러오기
+
+`MODEL_NAME`으로 고릅니다. 학습 메모리는 **gradient checkpointing**(중간 활성값을 저장하지 않고 역전파 때 다시 계산)으로 줄입니다.
+
+| 모델 | 파라미터 | T4에서 LoRA 학습 | 비고 |
+|---|---|---|---|
+| `UNI-2` (기본) | 6.8억 | 가능 | CC BY-NC-ND |
+| `Virchow2` | 6.3억 | 가능 | CC BY-NC-ND, 학술 연구 전용 |
+| `H-optimus-0` | 11억 | 가능하지만 약 2배 느림 | Apache 2.0 |
+
+> ⚠️ UNI-2와 Virchow2는 **파생물(미세조정 가중치 포함) 배포가 금지**된 라이선스입니다. 학습한 Adapter/LoRA 가중치를 공유하지 마세요.
+'''))
+C.append(code(r'''
+import timm
+MODEL_NAME = "UNI-2"   # "UNI-2" | "Virchow2" | "H-optimus-0"
+
+def load_backbone(name):
+    if name == "UNI-2":
+        m = timm.create_model("hf-hub:MahmoodLab/UNI2-h", pretrained=True, img_size=224, patch_size=14, depth=24, num_heads=24,
+                              init_values=1e-5, embed_dim=1536, mlp_ratio=2.66667 * 2, num_classes=0, no_embed_class=True,
+                              mlp_layer=timm.layers.SwiGLUPacked, act_layer=torch.nn.SiLU, reg_tokens=8, dynamic_img_size=True)
+        return m, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+    if name == "Virchow2":
+        m = timm.create_model("hf-hub:paige-ai/Virchow2", pretrained=True, mlp_layer=timm.layers.SwiGLUPacked, act_layer=torch.nn.SiLU)
+        return m, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+    if name == "H-optimus-0":
+        m = timm.create_model("hf-hub:bioptimus/H-optimus-0", pretrained=True, init_values=1e-5, dynamic_img_size=False)
+        return m, (0.707223, 0.578729, 0.703617), (0.211883, 0.230117, 0.177517)
+    raise ValueError(name)
+
+def pooled(backbone, x):
+    # 패치 → 임베딩. Virchow2처럼 토큰 전체가 나오면 CLS + 패치 평균을 이어 붙인다
+    f = backbone(x)
+    if f.ndim == 3:
+        f = torch.cat([f[:, 0], f[:, backbone.num_prefix_tokens:].mean(1)], dim=-1)
+    return f
+
+base, MEAN, STD = load_backbone(MODEL_NAME)
+base = base.eval().to(DEVICE)
+# PCam 패치는 96px @ 약 1 µm/px → 모델 입력 224px로 확대 (해상도가 학습 때와 다르다는 점은 한계)
+TF = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(), transforms.Normalize(MEAN, STD)])
+AUG = transforms.Compose([transforms.Resize((224, 224)), transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
+                          transforms.RandomApply([transforms.RandomRotation((90, 90))], p=0.5),
+                          transforms.ColorJitter(0.1, 0.1, 0.1, 0.02), transforms.ToTensor(), transforms.Normalize(MEAN, STD)])
+with torch.inference_mode():
+    EMB_DIM = pooled(base, torch.zeros(1, 3, 224, 224, device=DEVICE)).shape[1]
+N_BASE = sum(p.numel() for p in base.parameters())
+print(f"{MODEL_NAME}: 파라미터 {N_BASE / 1e6:.0f}M | 임베딩 {EMB_DIM}차원 | 블록 {len(base.blocks)}개")
+'''))
+
+# ── helpers
+C.append(md(r'''
+### 공통 학습·평가 함수
+
+모든 방식을 **같은 데이터·같은 평가 함수**로 비교합니다. 학습 중에는 매 epoch 검증 AUROC를 기록하고, 가장 좋았던 시점의 가중치로 평가합니다.
+'''))
+C.append(code(r'''
+from sklearn.metrics import roc_auc_score, balanced_accuracy_score, roc_curve
+
+def batches(X, y, bs, tf, shuffle=False, seed=0):
+    idx = np.random.default_rng(seed).permutation(len(X)) if shuffle else np.arange(len(X))
+    for b in range(0, len(idx), bs):
+        ii = idx[b:b + bs]
+        yield torch.stack([tf(Image.fromarray(X[i])) for i in ii]).to(DEVICE), torch.tensor(y[ii]).to(DEVICE)
+
+@torch.inference_mode()
+def predict(net, X, bs=64):
+    net.eval(); out = []
+    for x, _ in batches(X, np.zeros(len(X), int), bs, TF):
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=DEVICE == "cuda"):
+            out.append(torch.softmax(net(x).float(), 1)[:, 1].cpu())
+    return torch.cat(out).numpy()
+
+def scores(p, y):
+    return dict(bal_acc=balanced_accuracy_score(y, p > 0.5), auroc=roc_auc_score(y, p))
+
+def n_trainable(net):
+    return sum(p.numel() for p in net.parameters() if p.requires_grad)
+
+def train(net, epochs=2, lr=1e-4, bs=32, name=""):
+    # 역전파가 필요한 방식(Adapter, LoRA)의 공통 학습 루프: AMP + AdamW + cosine 스케줄
+    params = [p for p in net.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(params, lr=lr, weight_decay=1e-4)
+    steps = epochs * int(np.ceil(len(Xtr) / bs))
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=steps, pct_start=0.1)
+    scaler = torch.amp.GradScaler(enabled=DEVICE == "cuda")
+    hist, best, best_state = [], -1, None
+    train_keys = {n for n, p in net.named_parameters() if p.requires_grad}
+    if DEVICE == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    t0 = time.time()
+    for ep in range(epochs):
+        net.train(); losses = []
+        for x, yb in batches(Xtr, ytr, bs, AUG, shuffle=True, seed=ep):
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=DEVICE == "cuda"):
+                loss = F.cross_entropy(net(x), yb)
+            opt.zero_grad(set_to_none=True); scaler.scale(loss).backward(); scaler.step(opt); scaler.update(); sched.step()
+            losses.append(loss.item())
+        val = scores(predict(net, Xva), yva)
+        hist.append(dict(epoch=ep + 1, loss=np.mean(losses), **{f"val_{k}": v for k, v in val.items()}, time=time.time() - t0))
+        print(f"[{name}] epoch {ep + 1}: loss {np.mean(losses):.3f} | 검증 AUROC {val['auroc']:.4f} | {time.time() - t0:.0f}s")
+        if val["auroc"] > best:
+            best, best_state = val["auroc"], {k: v.detach().clone() for k, v in net.state_dict().items() if k in train_keys}
+    net.load_state_dict(best_state, strict=False)
+    mem = torch.cuda.max_memory_allocated() / 1e9 if DEVICE == "cuda" else np.nan
+    return pd.DataFrame(hist), time.time() - t0, mem
+
+RESULTS, CURVES, PROBS = {}, {}, {}
+def record(name, p, trainable, sec, mem, curve=None):
+    RESULTS[name] = dict(**scores(p, yte), trainable=trainable, trainable_pct=100 * trainable / N_BASE, train_sec=sec, gpu_gb=mem)
+    PROBS[name] = p
+    if curve is not None:
+        CURVES[name] = curve
+    print(f"→ {name}: 평가 AUROC {RESULTS[name]['auroc']:.4f} · 균형 정확도 {RESULTS[name]['bal_acc']:.4f} · 학습 파라미터 {trainable:,}")
+'''))
+
+# ── (1) linear
+C.append(md(r'''
+## 3. (1) 선형 분류기 (모델 고정)
+
+05~07 노트북과 같은 방식입니다. 임베딩을 한 번만 뽑고 로지스틱 회귀를 학습합니다. **이 값이 비교 기준(baseline)** 입니다.
+'''))
+C.append(code(r'''
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+
+@torch.inference_mode()
+def extract(X, bs=64):
+    out = []
+    for x, _ in batches(X, np.zeros(len(X), int), bs, TF):
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=DEVICE == "cuda"):
+            out.append(pooled(base, x).float().cpu())
+    return torch.cat(out).numpy()
+
+t = time.time()
+Ftr, Fva, Fte = extract(Xtr), extract(Xva), extract(Xte)
+t_feat = time.time() - t
+t = time.time()
+lin = make_pipeline(StandardScaler(), LogisticRegression(max_iter=5000, C=0.1)).fit(Ftr, ytr)
+record("(1) 선형 분류기", lin.predict_proba(Fte)[:, 1], trainable=EMB_DIM * 2 + 2, sec=time.time() - t, mem=np.nan)
+print(f"(임베딩 추출 {t_feat:.0f}s — 고정 방식은 이 시간이 한 번만 듦)")
+base = base.cpu(); torch.cuda.empty_cache()  # 원본은 CPU에 두고, 미세조정할 복사본만 GPU에 올린다 (GPU 메모리 절약)
+'''))
+
+# ── (2) adapter head
+C.append(md(r'''
+## 4. (2) Adapter 헤드 (고정 임베딩 + 작은 MLP)
+
+backbone은 그대로 두고, 이미 뽑아 둔 임베딩 위에 **2층 MLP**를 학습합니다. 역전파가 backbone을 지나지 않아 몇 초면 끝납니다.
+(입력 임베딩이 고정이라 데이터 증강을 쓸 수 없다는 점이 한계)
+'''))
+C.append(code(r'''
+class MLPHead(nn.Module):
+    def __init__(self, d, hidden=256, n_cls=2, drop=0.3):
+        super().__init__()
+        self.net = nn.Sequential(nn.LayerNorm(d), nn.Dropout(drop), nn.Linear(d, hidden), nn.GELU(), nn.Dropout(drop), nn.Linear(hidden, n_cls))
+    def forward(self, f):
+        return self.net(f)
+
+head2 = MLPHead(EMB_DIM).to(DEVICE)
+opt = torch.optim.AdamW(head2.parameters(), lr=1e-3, weight_decay=1e-2)
+Ft, yt = torch.tensor(Ftr).to(DEVICE), torch.tensor(ytr).to(DEVICE)
+hist, best, t = [], -1, time.time()
+for ep in range(60):
+    head2.train(); perm = torch.randperm(len(Ft))
+    for b in range(0, len(perm), 128):
+        ii = perm[b:b + 128]
+        loss = F.cross_entropy(head2(Ft[ii]), yt[ii]); opt.zero_grad(); loss.backward(); opt.step()
+    head2.eval()
+    with torch.no_grad():
+        pv = torch.softmax(head2(torch.tensor(Fva).to(DEVICE)), 1)[:, 1].cpu().numpy()
+    auc = roc_auc_score(yva, pv); hist.append(dict(epoch=ep + 1, val_auroc=auc))
+    if auc > best:
+        best, state = auc, copy.deepcopy(head2.state_dict())
+head2.load_state_dict(state)
+with torch.no_grad():
+    p2 = torch.softmax(head2(torch.tensor(Fte).to(DEVICE)), 1)[:, 1].cpu().numpy()
+record("(2) Adapter 헤드", p2, trainable=n_trainable(head2), sec=time.time() - t, mem=np.nan, curve=pd.DataFrame(hist))
+'''))
+
+# ── (3) bottleneck adapter
+C.append(md(r'''
+## 5. (3) Bottleneck Adapter (블록 안에 끼워 넣기)
+
+각 transformer 블록의 MLP 출력 뒤에 작은 모듈을 붙입니다.
+
+```
+  h ─► 원래 MLP (고정) ─► y ─┬─────────────────────────────► y + s · up(GELU(down(y)))
+                            └─► down: d → r ─► GELU ─► up: r → d ┘     (r = 64, up은 0으로 초기화)
+```
+
+`up`을 0으로 초기화하므로 **학습 시작 시점의 모델은 원래 모델과 똑같고**, 학습하면서 과제에 필요한 만큼만 바뀝니다.
+backbone 가중치는 모두 고정하고 adapter와 분류 헤드만 학습합니다. 직접 구현해 원리를 보여 줍니다.
+'''))
+C.append(code(r'''
+class Bottleneck(nn.Module):
+    def __init__(self, d, r=64, scale=1.0):
+        super().__init__()
+        self.down, self.up, self.scale = nn.Linear(d, r), nn.Linear(r, d), scale
+        nn.init.zeros_(self.up.weight); nn.init.zeros_(self.up.bias)
+    def forward(self, y):
+        return y + self.scale * self.up(F.gelu(self.down(y)))
+
+class MLPWithAdapter(nn.Module):
+    def __init__(self, mlp, d, r):
+        super().__init__()
+        self.mlp, self.adapter = mlp, Bottleneck(d, r)
+    def forward(self, x):
+        return self.adapter(self.mlp(x))
+
+class Classifier(nn.Module):
+    # backbone + 분류 헤드 (Adapter, LoRA 공통)
+    def __init__(self, backbone, d, n_cls=2):
+        super().__init__()
+        self.backbone, self.head = backbone, nn.Linear(d, n_cls)
+    def forward(self, x):
+        return self.head(pooled(self.backbone, x))
+
+net3 = copy.deepcopy(base)
+for p in net3.parameters():
+    p.requires_grad = False
+for blk in net3.blocks:
+    blk.mlp = MLPWithAdapter(blk.mlp, net3.embed_dim, r=64)   # 새로 만든 adapter만 requires_grad=True
+net3.set_grad_checkpointing(True)
+model3 = Classifier(net3, EMB_DIM).to(DEVICE)
+print(f"학습 파라미터 {n_trainable(model3):,} / 전체 {sum(p.numel() for p in model3.parameters()):,} "
+      f"({100 * n_trainable(model3) / N_BASE:.2f}%)")
+
+EPOCHS = 2
+curve3, sec3, mem3 = train(model3, epochs=EPOCHS, lr=3e-4, name="(3) Bottleneck Adapter")
+record("(3) Bottleneck Adapter", predict(model3, Xte), n_trainable(model3), sec3, mem3, curve3)
+del model3, net3; gc.collect(); torch.cuda.empty_cache()
+'''))
+
+# ── (4) LoRA
+C.append(md(r'''
+## 6. (4) LoRA (HuggingFace `peft`)
+
+LoRA는 선형층 W(d×d)를 **W + (α/r)·B·A** 로 바꿉니다. A는 r×d, B는 d×r (r ≪ d)이고 **A, B만 학습**합니다.
+`peft` 라이브러리에 바꿀 층 이름(`target_modules`)만 알려 주면 됩니다. timm ViT의 attention은 `qkv`라는 선형층 하나로 Q·K·V를 한 번에 계산하므로 여기에 붙입니다.
+
+| 설정 | 값 | 의미 |
+|---|---|---|
+| `r` | 8 | 저차원 행렬의 크기 (클수록 표현력↑, 파라미터↑) |
+| `lora_alpha` | 16 | 업데이트 크기 배율 (α/r = 2) |
+| `target_modules` | `["qkv"]` | LoRA를 붙일 층 이름 (`["qkv", "proj"]`, `["qkv", "fc1", "fc2"]` 등으로 넓힐 수 있음) |
+| `lora_dropout` | 0.1 | 과적합 방지 |
+| 학습률 | 5e-4 | 검증 세트로 고른 값 (아래 참고) |
+
+> **학습률이 중요합니다.** 같은 설정에서 학습률만 바꿔 검증 AUROC를 비교했을 때 1e-4 → 0.980, **5e-4 → 0.994**, 1e-3 → 0.993이었습니다.
+> 1e-4로는 LoRA가 선형 분류기보다도 못했습니다. 학습률·`r`·`target_modules`는 **검증 세트**로 고르고, 평가 세트는 마지막에 한 번만 씁니다.
+'''))
+C.append(code(r'''
+from peft import LoraConfig, get_peft_model
+
+net4 = copy.deepcopy(base)
+lora_cfg = LoraConfig(r=8, lora_alpha=16, target_modules=["qkv"], lora_dropout=0.1, bias="none")
+net4 = get_peft_model(net4, lora_cfg)
+net4.print_trainable_parameters()
+net4.base_model.model.set_grad_checkpointing(True)
+model4 = Classifier(net4, EMB_DIM).to(DEVICE)
+
+# 어떤 층에 LoRA가 붙었는지 확인
+print([n for n, _ in net4.named_modules() if n.endswith("qkv")][:2], "...")
+print(net4.base_model.model.blocks[0].attn.qkv)
+
+curve4, sec4, mem4 = train(model4, epochs=EPOCHS, lr=5e-4, name="(4) LoRA")
+record("(4) LoRA (peft)", predict(model4, Xte), n_trainable(model4), sec4, mem4, curve4)
+'''))
+
+# ── compare
+C.append(md(r'''
+## 7. 결과 비교
+
+같은 평가 세트(학습과 다른 슬라이드의 4,000장)에서 비교합니다.
+'''))
+C.append(code(r'''
+res = pd.DataFrame(RESULTS).T
+show = res.assign(학습파라미터=res.trainable.map(lambda v: f"{int(v):,}"), 비율=res.trainable_pct.map(lambda v: f"{v:.3f}%"),
+                  학습시간=res.train_sec.map(lambda v: f"{v:.0f}s"), GPU=res.gpu_gb.map(lambda v: "-" if np.isnan(v) else f"{v:.1f}GB"))
+display(show[["auroc", "bal_acc", "학습파라미터", "비율", "학습시간", "GPU"]].round(4))
+
+COLS = {"(1) 선형 분류기": "#888888", "(2) Adapter 헤드": "#4c9be8", "(3) Bottleneck Adapter": "#e3a21a", "(4) LoRA (peft)": "#c2185b"}
+fig, ax = plt.subplots(1, 3, figsize=(20, 5.2))
+x = np.arange(len(res))
+for k, (metric, title) in enumerate([("auroc", "평가 AUROC"), ("bal_acc", "평가 균형 정확도")]):
+    bars = ax[k].bar(x, res[metric], color=[COLS[n] for n in res.index], ec="k")
+    for b, v in zip(bars, res[metric]):
+        ax[k].text(b.get_x() + b.get_width() / 2, v + 0.002, f"{v:.3f}", ha="center", fontsize=10)
+    lo = max(0.5, res[metric].min() - 0.05)
+    ax[k].set_ylim(lo, 1.0); ax[k].set_xticks(x); ax[k].set_xticklabels(res.index, rotation=15); ax[k].set_title(title)
+    ax[k].grid(axis="y", alpha=0.3)
+for n, r in res.iterrows():
+    ax[2].scatter(r.trainable, r.auroc, s=180, color=COLS[n], ec="k", zorder=3, label=n)
+ax[2].set_xscale("log"); ax[2].set_xlabel("학습한 파라미터 수 (log)"); ax[2].set_ylabel("평가 AUROC")
+ax[2].set_title(f"학습 파라미터 vs 성능 (backbone 전체 {N_BASE / 1e6:.0f}M)"); ax[2].grid(alpha=0.3); ax[2].legend(fontsize=9)
+plt.tight_layout(); plt.show()
+'''))
+C.append(code(r'''
+fig, ax = plt.subplots(1, 2, figsize=(15, 5.2))
+for n, p in PROBS.items():
+    fpr, tpr, _ = roc_curve(yte, p)
+    ax[0].plot(fpr, tpr, color=COLS[n], lw=2, label=f"{n} (AUC {roc_auc_score(yte, p):.3f})")
+ax[0].plot([0, 1], [0, 1], "k:", lw=1); ax[0].set_xlabel("위양성률 (1 - 특이도)"); ax[0].set_ylabel("민감도")
+ax[0].set_title("ROC 곡선 (평가 세트)"); ax[0].legend(fontsize=9, loc="lower right"); ax[0].grid(alpha=0.3)
+for n, c in CURVES.items():
+    ax[1].plot(c.epoch / c.epoch.max(), c.val_auroc, marker="o" if len(c) < 10 else None, color=COLS[n], lw=2, label=n)
+ax[1].axhline(roc_auc_score(yva, lin.predict_proba(Fva)[:, 1]), color=COLS["(1) 선형 분류기"], ls="--", label="(1) 선형 분류기 (검증)")
+ax[1].set_xlabel("학습 진행 (1 = 마지막 epoch)"); ax[1].set_ylabel("검증 AUROC"); ax[1].set_title("학습 중 검증 성능")
+ax[1].legend(fontsize=9); ax[1].grid(alpha=0.3)
+plt.tight_layout(); plt.show()
+'''))
+C.append(md(r'''
+### 무엇이 바뀌었나: 선형 분류기가 틀리고 LoRA가 맞힌 패치
+
+같은 평가 패치에서 두 방식의 판정을 비교합니다. 윗줄은 LoRA가 고친 오답, 아랫줄은 LoRA도 여전히 틀린 패치입니다.
+'''))
+C.append(code(r'''
+p1, p4 = PROBS["(1) 선형 분류기"], PROBS["(4) LoRA (peft)"]
+fixed = np.flatnonzero(((p1 > 0.5) != yte) & ((p4 > 0.5) == yte))
+still = np.flatnonzero(((p1 > 0.5) != yte) & ((p4 > 0.5) != yte))
+broke = np.flatnonzero(((p1 > 0.5) == yte) & ((p4 > 0.5) != yte))
+print(f"선형이 틀린 {((p1 > 0.5) != yte).sum()}장 중 LoRA가 고친 것 {len(fixed)}장, 여전히 틀린 것 {len(still)}장 | 반대로 LoRA만 틀린 것 {len(broke)}장")
+sel_f, sel_s = fixed[:10], still[:10]
+grid = [Xte[i] for i in sel_f] + [Xte[i] for i in sel_s]
+titles = [f"정답 {CLASS[yte[i]]}\n선형 {p1[i]:.2f} → LoRA {p4[i]:.2f}" for i in np.concatenate([sel_f, sel_s])]
+borders = [(40, 170, 60)] * len(sel_f) + [(220, 40, 40)] * len(sel_s)
+viz.image_grid(grid, titles=titles, ncols=10, size=1.6, border_colors=borders,
+               suptitle="초록 = LoRA가 고친 오답 · 빨강 = 둘 다 틀림 (숫자 = 전이 확률)")
+'''))
+
+# ── save / load
+C.append(md(r'''
+## 8. LoRA 가중치 저장·불러오기·합치기
+
+LoRA의 장점 중 하나는 **추가된 가중치만 따로 저장**할 수 있다는 점입니다 (backbone 수 GB 대신 몇 MB).
+또 `merge_and_unload()`로 LoRA를 원래 가중치에 합치면 **추론 속도가 원래 모델과 같아집니다.**
+
+> ⚠️ UNI-2·Virchow2로 학습한 LoRA 가중치는 라이선스상 파생물이므로 **다른 사람에게 배포하면 안 됩니다** (개인 연구용 저장만).
+'''))
+C.append(code(r'''
+save_dir = WORKDIR / "outputs" / f"lora_{MODEL_NAME}"
+net4.save_pretrained(save_dir)                       # LoRA 가중치만 저장
+torch.save(model4.head.state_dict(), save_dir / "head.pt")
+size_mb = sum(f.stat().st_size for f in save_dir.iterdir()) / 1e6
+print(f"저장: {save_dir} ({size_mb:.1f} MB)  ← backbone 전체 약 {N_BASE * 2 / 1e9:.1f} GB (fp16)와 비교")
+
+# 다시 불러오기: 원래 backbone + 저장한 LoRA
+from peft import PeftModel
+fresh = PeftModel.from_pretrained(copy.deepcopy(base), save_dir)
+reloaded = Classifier(fresh, EMB_DIM).to(DEVICE)
+reloaded.head.load_state_dict(torch.load(save_dir / "head.pt"))
+p_re = predict(reloaded, Xte[:500])
+print("다시 불러온 모델과 학습 직후 모델의 예측 차이 (최대):", float(np.abs(p_re - PROBS["(4) LoRA (peft)"][:500]).max()))
+
+# 합치기 → 일반 timm 모델이 되어 속도 손실 없음
+merged = Classifier(fresh.merge_and_unload(), EMB_DIM).to(DEVICE)
+merged.head.load_state_dict(model4.head.state_dict())
+p_mg = predict(merged, Xte[:500])
+print("합친 모델과의 예측 차이 (최대):", float(np.abs(p_mg - PROBS["(4) LoRA (peft)"][:500]).max()))
+
+@torch.inference_mode()
+def speed(net, n=10, bs=32):
+    x = torch.randn(bs, 3, 224, 224, device=DEVICE); net.eval()
+    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=DEVICE == "cuda"):
+        net(x); torch.cuda.synchronize(); t = time.time()
+        for _ in range(n):
+            net(x)
+        torch.cuda.synchronize()
+    return n * bs / (time.time() - t)
+print(f"추론 속도 — LoRA 붙인 상태 {speed(reloaded):.0f}장/s · 합친 상태 {speed(merged):.0f}장/s")
+del fresh, reloaded, merged; gc.collect(); torch.cuda.empty_cache()
+'''))
+
+# ── summary
+C.append(md(r'''
+## 정리
+
+| 상황 | 추천 |
+|---|---|
+| 빠르게 기준 성능 확인, 라벨이 적음 | (1) 선형 분류기 / (2) Adapter 헤드 (임베딩 한 번 추출) |
+| 고정 임베딩으로 부족, GPU 한 장 | (4) LoRA — 파라미터 0.2% 학습으로 성능 향상, 추론 때 합쳐서 속도 손실 없음 |
+| 블록마다 과제 맞춤 변환이 필요 | (3) Bottleneck Adapter |
+| 데이터가 매우 많고 자원이 충분 | 전체 미세조정 (이 노트북에서는 다루지 않음) |
+
+**실전 팁**
+- 평가는 반드시 **다른 슬라이드/환자**에서 (같은 슬라이드의 패치끼리 나누면 성능이 부풀려짐)
+- 학습률: LoRA 3e-4 ~ 1e-3, Adapter 1e-4 ~ 1e-3 부근에서 시작 (이 예제에서 LoRA 1e-4는 너무 낮았음)
+- `r`, `target_modules`, epoch 수를 검증 세트로 고르고, 평가 세트는 마지막에 한 번만
+- 학습 데이터가 적으면 미세조정이 오히려 과적합될 수 있으니 (1) (2)와 항상 같이 비교
+- 이 예제는 PCam 패치(약 1 µm/px)를 224로 키워 쓰므로 모델의 학습 해상도(0.5 µm/px)와 다릅니다. 실제 과제에서는 해상도를 맞추세요.
+
+**참고**: Houlsby et al., *Parameter-Efficient Transfer Learning for NLP* (2019) · Hu et al., *LoRA* (2021) · HuggingFace `peft` 문서
+'''))
+
+
+nb = nbf.v4.new_notebook()
+nb.cells = C
+nb.metadata = {"accelerator": "GPU", "colab": {"gpuType": "T4", "provenance": []},
+               "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+               "language_info": {"name": "python"}}
+nbf.write(nb, NB)
+print("wrote", NB)

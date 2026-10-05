@@ -516,7 +516,8 @@ def image_grid(images, titles=None, ncols=8, size=1.6, border_colors=None, supti
     """이미지 여러 장을 격자로. border_colors: 각 이미지 테두리 색 (R, G, B) 또는 None"""
     n = len(images)
     nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * size, nrows * (size + 0.25)), squeeze=False)
+    lines = max((str(tt).count("\n") + 1 for tt in titles), default=0) if titles is not None else 0
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * size, nrows * (size + 0.25 + 0.17 * lines)), squeeze=False)
     for k, a in enumerate(axes.ravel()):
         a.set_xticks([]); a.set_yticks([])
         if k >= n:

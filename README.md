@@ -9,6 +9,7 @@
 | `05_UNI2.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/05_UNI2.ipynb) | UNI-2 (병리 foundation model, 패치 임베딩): 임베딩 UMAP·검색, 선형 분류기 정확도, 적은 라벨 학습 곡선(ImageNet 대비), 패치 토큰 PCA, 슬라이드 조직 지도·비지도 군집·유사 영역 검색 |
 | `06_H-optimus-0.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/06_H-optimus-0.ipynb) | H-optimus-0: 05와 같은 구성 + UNI-2와 같은 데이터·같은 평가로 비교 |
 | `07_Virchow2.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/07_Virchow2.ipynb) | Virchow2 (CLS + 패치 평균 2,560차원 임베딩): 05와 같은 구성 + **UNI-2 · H-optimus-0 · Virchow2 세 모델 비교** (few-shot 곡선, 클래스별 F1, 처리 속도, 슬라이드 조직 지도 일치율) |
+| `08_PEFT_finetuning.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/08_PEFT_finetuning.ipynb) | Foundation model 미세조정: 선형 분류기 vs Adapter 헤드 vs Bottleneck Adapter(직접 구현) vs **LoRA(HuggingFace `peft`)** — PatchCamelyon 림프절 전이 검출, 학습 파라미터·GPU 메모리·시간·AUROC 비교, LoRA 저장/불러오기/병합 |
 
 ## 시각화
 
@@ -41,6 +42,7 @@
   - Virchow2 (`paige-ai/Virchow2`): 기관 이메일 필요. CC BY-NC-ND 4.0, 학술 연구 전용(임상·RUO·상업적 이용 금지).
 - 학습·평가 데이터: Kather et al. CRC-VAL-HE-7K (대장 조직 9종, 224px @ 0.5 µm/px, CC BY 4.0, 800MB, Zenodo).
 - 슬라이드 예제: TCGA-AD-6890 대장암 진단 슬라이드 (GDC open access, 73MB).
+- 08 미세조정 데이터: PatchCamelyon (HuggingFace `1aurent/PatchCamelyon`, CC0) 학습·평가 파일 각 1개. UNI-2·Virchow2로 학습한 Adapter/LoRA 가중치는 라이선스상 배포 금지.
 
 ## HNE2Cell 노트북 참고
 
