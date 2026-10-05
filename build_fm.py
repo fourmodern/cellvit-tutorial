@@ -59,6 +59,7 @@ UNI2 = dict(
     MEAN, STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)  # ImageNet
     ''',
     COLOR="#7b3fb5",
+    DIM="1,536",
 )
 
 HOPT = dict(
@@ -88,13 +89,49 @@ HOPT = dict(
     MEAN, STD = (0.707223, 0.578729, 0.703617), (0.211883, 0.230117, 0.177517)  # H&E 데이터 기준
     ''',
     COLOR="#d0602a",
+    DIM="1,536",
+)
+
+VIRCHOW2 = dict(
+    NB="07_Virchow2.ipynb",
+    NAME="Virchow2",
+    SHORT="virchow2",
+    HUB="paige-ai/Virchow2",
+    CARD="""
+| 항목 | 내용 (HuggingFace 모델 카드 기준) |
+|---|---|
+| 개발 | Paige (뉴욕) + Microsoft Research |
+| 구조 | ViT-H/14, 32층, SwiGLU, register token 4개 (DINOv2 변형으로 자기지도 학습) |
+| 크기 | 약 6.3억 파라미터, 토큰 1,280차원 → **CLS 토큰 + 패치 토큰 평균을 이어 붙인 2,560차원** 임베딩 |
+| 학습 데이터 | Memorial Sloan Kettering Cancer Center 슬라이드 310만 장, 2.0 / 1.0 / 0.5 / 0.25 µm/px (5x~40x)에서 타일 추출 |
+| 입력 | 224×224 px, ImageNet 평균/표준편차로 정규화 |
+| 라이선스 | **CC BY-NC-ND 4.0** — **학술 연구 전용**. 진단·치료 등 임상 목적, RUO/IUO, 상업적 이용 금지, 모델 재배포 금지 |
+| 논문 | Zimmermann et al., *Virchow2*, arXiv:2408.00738 |
+""",
+    ACCESS="""
+1. https://huggingface.co/paige-ai/Virchow2 에서 사용 조건 동의 양식 제출
+   - 모델 카드에 따르면 HuggingFace 계정의 **주 이메일이 기관 이메일**이어야 하며, 상업 기관은 별도 사용 목적 설명이 없으면 거절됩니다.
+2. https://huggingface.co/settings/tokens 에서 **Read** 토큰 발급
+3. Colab 왼쪽 🔑(보안 비밀)에 이름 `HF_TOKEN`으로 토큰 저장 → 노트북 접근 허용
+""",
+    LOAD='''
+    import timm
+    from timm.data import resolve_data_config
+    model = timm.create_model("hf-hub:paige-ai/Virchow2", pretrained=True,
+                              mlp_layer=timm.layers.SwiGLUPacked, act_layer=torch.nn.SiLU)
+    _cfg = resolve_data_config(model.pretrained_cfg, model=model)
+    MEAN, STD = _cfg["mean"], _cfg["std"]  # 모델 설정에 저장된 정규화 값
+    # Virchow2는 토큰 전체를 돌려줌 → embed()에서 CLS 토큰과 패치 토큰 평균을 이어 붙여 2,560차원으로 만듦
+    ''',
+    COLOR="#1f8a8a",
+    DIM="2,560",
 )
 
 
 # ─────────────────────────────────────────────────────────────
 # 공통 셀
 # ─────────────────────────────────────────────────────────────
-def cells(M, compare_uni2=False):
+def cells(M, compare=None):
     C = []
     nb = M["NB"]
     C.append(md(f'<a href="https://colab.research.google.com/github/{REPO}/blob/main/{nb}" target="_parent">'
@@ -103,7 +140,7 @@ def cells(M, compare_uni2=False):
     # {{NAME}} 튜토리얼: 병리 foundation model로 조직 이해하기
 
     **{{NAME}}** 은 수많은 H&E 이미지로 **자기지도 학습**한 병리 foundation model입니다.
-    224×224 px 조직 패치 하나를 넣으면 **1,536차원 벡터(임베딩)** 하나를 돌려줍니다.
+    224×224 px 조직 패치 하나를 넣으면 **{{DIM}}차원 벡터(임베딩)** 하나를 돌려줍니다.
     이 벡터에는 조직의 형태 정보가 압축되어 있어서, 그 위에 간단한 분류기만 얹어도 다양한 과제를 풀 수 있습니다.
 
     {{CARD}}
@@ -113,7 +150,7 @@ def cells(M, compare_uni2=False):
     | | CellViT / HNE2Cell (01~04) | **{{NAME}}** |
     |---|---|---|
     | 단위 | 세포 하나하나 (핵 분할 + 분류) | **패치 전체** (224px ≈ 112 µm) |
-    | 출력 | 세포 윤곽 + 세포 타입 | 패치당 1,536차원 벡터 |
+    | 출력 | 세포 윤곽 + 세포 타입 | 패치당 {{DIM}}차원 벡터 |
     | 쓰는 법 | 그대로 결과 사용 | 벡터 위에 분류기·군집·검색 등을 얹어 사용 |
 
     ### 이 노트북에서 하는 것
@@ -126,7 +163,7 @@ def cells(M, compare_uni2=False):
     | 4 | **선형 분류기(linear probe)** 로 조직 분류 정확도, 적은 라벨 학습 곡선 (ImageNet 모델과 비교) |
     | 5 | 패치 토큰 PCA: 모델이 패치 안에서 무엇을 구분하는지 |
     | 6 | 전체 슬라이드에 적용: 조직 지도, 비지도 군집, 비슷한 영역 찾기 |
-    """ + ("| 7 | **UNI-2와 비교** (같은 데이터, 같은 평가) |\n" if compare_uni2 else ""), M)))
+    """ + (f"| 7 | **모델 비교**: {' · '.join(compare)} (같은 데이터, 같은 평가) |\n" if compare else ""), M)))
     C.append(md(sub("""
     ## 0. 준비: HuggingFace 접근 권한
 
@@ -212,7 +249,7 @@ def cells(M, compare_uni2=False):
     TRANSFORM = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(), transforms.Normalize(MEAN, STD)])
     N_PREFIX = model.num_prefix_tokens  # CLS + register 토큰 수 (패치 토큰 앞에 붙음)
     print(f"{{NAME}} 로딩 {time.time() - t:.0f}s | 파라미터 {sum(p.numel() for p in model.parameters()) / 1e6:.0f}M | "
-          f"출력 {model.num_features}차원 | 앞쪽 특수 토큰 {N_PREFIX}개")
+          f"토큰 {model.num_features}차원 | 앞쪽 특수 토큰(CLS+register) {N_PREFIX}개")
 
     @torch.inference_mode()
     def embed(images, batch=64, mdl=None, tfm=None, tokens=False):
@@ -222,7 +259,12 @@ def cells(M, compare_uni2=False):
         for i in range(0, len(images), batch):
             x = torch.stack([tfm(Image.fromarray(im) if isinstance(im, np.ndarray) else im) for im in images[i:i + batch]]).to(DEVICE)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=DEVICE == "cuda"):
-                f = mdl.forward_features(x)[:, mdl.num_prefix_tokens:] if tokens else mdl(x)
+                if tokens:
+                    f = mdl.forward_features(x)[:, mdl.num_prefix_tokens:]
+                else:
+                    f = mdl(x)
+                    if f.ndim == 3:  # 토큰 전체가 나오는 모델(Virchow2): CLS 토큰 + 패치 토큰 평균
+                        f = torch.cat([f[:, 0], f[:, mdl.num_prefix_tokens:].mean(1)], dim=-1)
             out.append(f.float().cpu())
         return torch.cat(out).numpy()
     """, M)))
@@ -275,7 +317,7 @@ def cells(M, compare_uni2=False):
     C.append(md(sub("""
     ### 임베딩 추출
 
-    패치 한 장 → {{NAME}} → 1,536차원 벡터. 이후 모든 분석은 이 벡터만으로 합니다.
+    패치 한 장 → {{NAME}} → {{DIM}}차원 벡터. 이후 모든 분석은 이 벡터만으로 합니다.
     """, M)))
     C.append(code("""
     t = time.time()
@@ -284,14 +326,14 @@ def cells(M, compare_uni2=False):
     """))
 
     # 3. embedding space
-    C.append(md("""
+    C.append(md(sub("""
     ## 3. 임베딩 공간 들여다보기
 
     ### 3-1. UMAP
 
-    1,536차원을 2차원으로 줄여 그립니다. **라벨을 전혀 쓰지 않은 모델**인데도 같은 조직끼리 모인다면,
+    {{DIM}}차원을 2차원으로 줄여 그립니다. **라벨을 전혀 쓰지 않은 모델**인데도 같은 조직끼리 모인다면,
     임베딩이 조직 형태를 잘 담고 있다는 뜻입니다. 오른쪽 인터랙티브 그림은 점 위에 마우스를 올리면 클래스가 보입니다.
-    """))
+    """, M)))
     C.append(code("""
     import umap
     U = umap.UMAP(n_neighbors=20, min_dist=0.2, random_state=0).fit_transform(X)
@@ -574,71 +616,139 @@ def cells(M, compare_uni2=False):
     viz.image_grid([tiles[i] for i in top], titles=[f"{simw[i]:.2f}" for i in top], ncols=8, size=1.5, suptitle="가장 비슷한 타일 16개")
     """))
 
-    if compare_uni2:
-        C.append(md("""
-        ## 7. UNI-2와 비교
+    if compare:
+        others = " · ".join(compare)
+        C.append(md(sub("""
+        ## 7. 모델 비교: {{NAME}} vs """ + others + """
 
-        같은 데이터·같은 평가 방법으로 **UNI-2**도 돌려 봅니다 (UNI-2 접근 권한이 있어야 하며, 없으면 이 섹션은 건너뜁니다).
-        두 모델은 GPU에 하나씩 올립니다.
-        """))
-        C.append(code("""
+        같은 데이터(대장 조직 9종), 같은 평가(선형 분류기, few-shot), 같은 슬라이드로 비교합니다.
+        각 모델의 HuggingFace 접근 권한이 있어야 하며, 권한이 없는 모델은 건너뜁니다. 모델은 GPU에 하나씩 올립니다.
+        (Colab T4 기준 모델당 5~10분: 가중치 다운로드 + 데이터·슬라이드 임베딩)
+        """, M)))
+        C.append(code(sub("""
         import timm
-        X_h0 = X
-        model = None; gc.collect(); torch.cuda.empty_cache()
-        try:
-            uni = timm.create_model("hf-hub:MahmoodLab/UNI2-h", pretrained=True, img_size=224, patch_size=14, depth=24, num_heads=24,
-                                    init_values=1e-5, embed_dim=1536, mlp_ratio=2.66667 * 2, num_classes=0, no_embed_class=True,
-                                    mlp_layer=timm.layers.SwiGLUPacked, act_layer=torch.nn.SiLU, reg_tokens=8, dynamic_img_size=True).eval().to(DEVICE)
-            uni_tf = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(),
-                                         transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
-            t = time.time(); X_uni = embed(images, mdl=uni, tfm=uni_tf); t_uni = time.time() - t
-            XW_uni = embed(tiles, mdl=uni, tfm=uni_tf)
-            del uni; gc.collect(); torch.cuda.empty_cache()
-            HAVE_UNI = True
-        except Exception as e:
-            print("UNI-2를 불러올 수 없어 비교를 건너뜁니다:", type(e).__name__, str(e)[:200])
-            HAVE_UNI = False
-        """))
-        C.append(code("""
-        if HAVE_UNI:
-            FS["UNI-2"] = few_shot(X_uni)
-            fig, ax = plt.subplots(1, 2, figsize=(17, 5.2))
-            for (name, d), col in zip(FS.items(), ["#d0602a", "#888", "#7b3fb5"]):
-                ax[0].errorbar(d.index, d["mean"], yerr=d["std"], marker="o", capsize=3, label=name, color=col, lw=2)
-            ax[0].set_xscale("log", base=2); ax[0].set_xlabel("클래스당 학습 라벨 수 (k)"); ax[0].set_ylabel("balanced accuracy")
-            ax[0].set_ylim(0, 1.02); ax[0].grid(alpha=0.3); ax[0].legend(); ax[0].set_title("few-shot 학습 곡선")
+        LOADERS = {  # 각 모델 카드의 로딩 코드 → (모델, 정규화 평균, 표준편차)
+            "UNI-2": lambda: (timm.create_model("hf-hub:MahmoodLab/UNI2-h", pretrained=True, img_size=224, patch_size=14, depth=24,
+                                                num_heads=24, init_values=1e-5, embed_dim=1536, mlp_ratio=2.66667 * 2, num_classes=0,
+                                                no_embed_class=True, mlp_layer=timm.layers.SwiGLUPacked, act_layer=torch.nn.SiLU,
+                                                reg_tokens=8, dynamic_img_size=True),
+                              (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            "H-optimus-0": lambda: (timm.create_model("hf-hub:bioptimus/H-optimus-0", pretrained=True, init_values=1e-5, dynamic_img_size=False),
+                                    (0.707223, 0.578729, 0.703617), (0.211883, 0.230117, 0.177517)),
+            "Virchow2": lambda: (timm.create_model("hf-hub:paige-ai/Virchow2", pretrained=True,
+                                                   mlp_layer=timm.layers.SwiGLUPacked, act_layer=torch.nn.SiLU),
+                                 (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        }
+        COMPARE = {{COMPARE}}
+        MODEL_COLOR = {"UNI-2": "#7b3fb5", "H-optimus-0": "#d0602a", "Virchow2": "#1f8a8a", "ImageNet ResNet-50": "#888888"}
 
-            from sklearn.metrics import f1_score
-            f1s = {}
-            for name, Xf in [("H-optimus-0", X_h0), ("UNI-2", X_uni)]:
-                _, p, _ = probe(Xf, idx_tr, idx_te)
-                f1s[name] = f1_score(y[idx_te], p, average=None, labels=range(len(CLASSES)))
-            xx = np.arange(len(CLASSES))
-            ax[1].bar(xx - 0.2, f1s["H-optimus-0"], 0.4, label="H-optimus-0", color="#d0602a")
-            ax[1].bar(xx + 0.2, f1s["UNI-2"], 0.4, label="UNI-2", color="#7b3fb5")
-            ax[1].set_xticks(xx); ax[1].set_xticklabels(CLASSES); ax[1].set_ylim(0.5, 1.02); ax[1].legend()
-            ax[1].set_title("선형 분류기 클래스별 F1 (전체 학습 세트)"); ax[1].grid(axis="y", alpha=0.3)
-            plt.tight_layout(); plt.show()
-            print(pd.concat({n: d["mean"].round(3) for n, d in FS.items()}, axis=1).T)
+        @torch.inference_mode()
+        def bench(mdl, tfm, batch=32, reps=5):
+            # 순수 모델 처리량 (이미지 전처리 제외, GPU 위에 미리 올린 배치로 측정)
+            x = torch.stack([tfm(Image.fromarray(im)) for im in images[:batch]]).to(DEVICE)
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=DEVICE == "cuda"):
+                mdl(x)  # 워밍업
+                if DEVICE == "cuda": torch.cuda.synchronize()
+                t = time.time()
+                for _ in range(reps):
+                    mdl(x)
+                if DEVICE == "cuda": torch.cuda.synchronize()
+            return batch * reps / (time.time() - t)
+
+        RES = {"{{NAME}}": dict(X=X, XW=XW, params=sum(p.numel() for p in model.parameters()) / 1e6,
+                                dim=X.shape[1], speed=bench(model, TRANSFORM))}
+        model = None; gc.collect(); torch.cuda.empty_cache()
+        for name in COMPARE:
+            try:
+                t = time.time()
+                m, mean, std = LOADERS[name]()
+                m = m.eval().to(DEVICE)
+                tf = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(), transforms.Normalize(mean, std)])
+                Xo = embed(images, mdl=m, tfm=tf)
+                RES[name] = dict(X=Xo, XW=embed(tiles, mdl=m, tfm=tf), params=sum(p.numel() for p in m.parameters()) / 1e6,
+                                 dim=Xo.shape[1], speed=bench(m, tf))
+                print(f"{name}: 완료 ({time.time() - t:.0f}s)")
+                del m
+            except Exception as e:
+                print(f"{name}: 건너뜀 — {type(e).__name__}: {str(e)[:150]}")
+            gc.collect(); torch.cuda.empty_cache()
+
+        spec = pd.DataFrame({n: {"파라미터(백만)": round(r["params"]), "임베딩 차원": r["dim"],
+                                 "GPU 처리량(장/s, fp16)": round(r["speed"])} for n, r in RES.items()}).T
+        display(spec)
+        """, dict(M, COMPARE=repr(compare)))))
+        C.append(md("""
+        ### 7-1. few-shot 학습 곡선과 클래스별 성능
+
+        - 왼쪽: 클래스당 라벨 k장으로 학습했을 때의 정확도 (5회 평균, ±표준편차)
+        - 오른쪽: 클래스당 4장으로 학습했을 때 **클래스별 F1** (5회 평균) — 어느 모델이 어떤 조직에서 강한지
         """))
         C.append(code("""
-        if HAVE_UNI:
-            # 같은 슬라이드에서 두 모델의 조직 지도가 얼마나 같은지
-            uni_clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=3000, C=0.5)).fit(X_uni, y)
-            lab_uni = np.array([CLASSES[i] for i in uni_clf.predict(XW_uni)])
-            agree = (lab_uni == lab_w).mean()
-            fig, ax = plt.subplots(1, 2, figsize=(22, 6.5))
-            viz.tile_map(thumb, DS, xy, TILE, labels=lab_w, color_map=COLOR, ax=ax[0], legend_order=CLASSES, title="H-optimus-0 조직 지도")
-            viz.tile_map(thumb, DS, xy, TILE, labels=lab_uni, color_map=COLOR, ax=ax[1], legend_order=CLASSES, title="UNI-2 조직 지도")
-            fig.suptitle(f"두 모델의 타일 예측 일치율 {agree:.1%}", fontsize=14)
-            plt.tight_layout(); plt.show()
-            ct = pd.crosstab(pd.Series(lab_w, name="H-optimus-0"), pd.Series(lab_uni, name="UNI-2")).reindex(index=CLASSES, columns=CLASSES, fill_value=0)
-            display(ct)
+        from sklearn.metrics import f1_score
+        for n, r in RES.items():
+            if n not in FS:
+                FS[n] = few_shot(r["X"])
+
+        def f1_at_k(Xf, k=4, seeds=5):
+            out = []
+            for s_ in range(seeds):
+                r_ = np.random.default_rng(s_)
+                tr = np.concatenate([r_.choice(idx_tr[y[idx_tr] == c], k, replace=False) for c in range(len(CLASSES))])
+                _, p, _ = probe(Xf, tr, idx_te)
+                out.append(f1_score(y[idx_te], p, average=None, labels=range(len(CLASSES))))
+            return np.mean(out, 0)
+
+        F1 = pd.DataFrame({n: f1_at_k(r["X"]) for n, r in RES.items()}, index=CLASSES).T
+        F1["macro"] = F1.mean(1)
+
+        fig, ax = plt.subplots(1, 2, figsize=(19, 5.5), gridspec_kw={"width_ratios": [1, 1.25]})
+        for n, d in FS.items():
+            ax[0].errorbar(d.index, d["mean"], yerr=d["std"], marker="o", capsize=3, lw=2, label=n, color=MODEL_COLOR.get(n, "k"))
+        ax[0].set_xscale("log", base=2); ax[0].set_xlabel("클래스당 학습 라벨 수 (k)"); ax[0].set_ylabel("balanced accuracy (평가 세트)")
+        ax[0].set_ylim(0, 1.02); ax[0].grid(alpha=0.3); ax[0].legend(); ax[0].set_title("few-shot 학습 곡선")
+        im = ax[1].imshow(F1.values, cmap="RdYlGn", vmin=0.6, vmax=1, aspect="auto")
+        for i in range(F1.shape[0]):
+            for j in range(F1.shape[1]):
+                best = F1.values[:, j].argmax() == i
+                ax[1].text(j, i, f"{F1.values[i, j]:.2f}" + ("★" if best else ""), ha="center", va="center", fontsize=9)
+        ax[1].set_xticks(range(F1.shape[1])); ax[1].set_xticklabels(F1.columns); ax[1].set_yticks(range(F1.shape[0])); ax[1].set_yticklabels(F1.index)
+        ax[1].set_title("클래스당 4장 학습 시 클래스별 F1 (★ = 그 클래스 최고)"); plt.colorbar(im, ax=ax[1], fraction=0.03)
+        plt.tight_layout(); plt.show()
+        print(pd.concat({n: d["mean"].round(3) for n, d in FS.items()}, axis=1).T)
         """))
         C.append(md("""
-        **해석 시 주의**: 이 데이터셋은 두 모델 모두 거의 다 맞히는 쉬운 과제라 차이가 작게 나옵니다.
-        실제 연구에서는 목적에 맞는(더 어려운) 데이터로 비교해야 합니다.
-        또 공개 벤치마크 데이터는 사전학습 데이터와 겹쳤을 가능성도 있습니다.
+        ### 7-2. 같은 슬라이드, 모델별 조직 지도
+
+        각 모델로 같은 방식(클래스당 300장, 로지스틱 회귀)의 분류기를 학습해 슬라이드에 적용합니다.
+        맨 오른쪽 행렬은 두 모델의 타일 예측이 같은 비율입니다.
+        """))
+        C.append(code("""
+        LAB = {}
+        for n, r in RES.items():
+            c_ = make_pipeline(StandardScaler(), LogisticRegression(max_iter=3000, C=0.5)).fit(r["X"], y)
+            LAB[n] = np.array([CLASSES[i] for i in c_.predict(r["XW"])])
+        names = list(LAB)
+        fig, ax = plt.subplots(1, len(names) + 1, figsize=(6.2 * (len(names) + 1), 6.4))
+        for a, n in zip(ax, names):
+            viz.tile_map(thumb, DS, xy, TILE, labels=LAB[n], color_map=COLOR, ax=a, title=n)
+            a.get_legend().remove()
+        viz.legend(ax[len(names) - 1], [(NAME[k], COLOR[k]) for k in CLASSES])
+        agree = np.array([[(LAB[a_] == LAB[b_]).mean() for b_ in names] for a_ in names])
+        ax[-1].imshow(agree, cmap="Blues", vmin=0.5, vmax=1)
+        for i in range(len(names)):
+            for j in range(len(names)):
+                ax[-1].text(j, i, f"{agree[i, j]:.0%}", ha="center", va="center", color="w" if agree[i, j] > 0.85 else "k", fontsize=12)
+        ax[-1].set_xticks(range(len(names))); ax[-1].set_xticklabels(names, rotation=20); ax[-1].set_yticks(range(len(names))); ax[-1].set_yticklabels(names)
+        ax[-1].set_title("타일 예측 일치율")
+        plt.tight_layout(); plt.show()
+        display(pd.DataFrame({n: pd.Series(l).value_counts() for n, l in LAB.items()}).reindex(CLASSES).fillna(0).astype(int).T)
+        """))
+        C.append(md("""
+        **해석 시 주의**
+        - 이 데이터셋은 라벨을 다 쓰면 모든 모델이 거의 100%인 쉬운 과제라, 차이는 **라벨이 적을 때**에만 드러납니다.
+        - 공개 벤치마크 데이터가 각 모델의 사전학습 데이터와 겹쳤을 가능성이 있습니다.
+        - 모델마다 강한 조직이 다를 수 있어서, 실제 연구에서는 **목적 데이터로 직접 비교**해 고르는 것이 좋습니다.
+        - 슬라이드 조직 지도는 정답이 없으므로 일치율은 정확도가 아닙니다.
         """))
 
     C.append(md(sub("""
@@ -647,7 +757,7 @@ def cells(M, compare_uni2=False):
     | 단계 | 핵심 |
     |---|---|
     | 입력 | 224×224 px @ 0.5 µm/px (40x 슬라이드는 448 px을 읽어 224로) |
-    | 출력 | 패치당 1,536차원 임베딩 (패치 토큰은 16×16개) |
+    | 출력 | 패치당 {{DIM}}차원 임베딩 (패치 토큰은 16×16개) |
     | 쓰는 법 | 선형 분류기·kNN·군집·유사도 검색 등을 임베딩 위에 얹기 |
 
     **이 노트북에서 본 것**
@@ -658,14 +768,14 @@ def cells(M, compare_uni2=False):
     **다음 단계**: 슬라이드 단위 예측(예후, 유전자 변이 등)은 타일 임베딩들을 모으는 MIL(multiple instance learning) 모델로 확장합니다.
 
     **라이선스**: {{LICENSE}}
-    """, dict(M, LICENSE="CC BY-NC-ND 4.0 — 비상업적 학술 연구용, 모델·파생 데이터의 상업적 이용 및 모델 재배포 금지" if M["SHORT"] == "uni2"
+    """, dict(M, LICENSE="CC BY-NC-ND 4.0 — 비상업적 학술 연구용, 모델·파생 데이터의 상업적 이용 및 모델 재배포 금지" if M["SHORT"] in ("uni2", "virchow2")
               else "Apache 2.0 — 단, 의료 목적 사용 시 규제 요건과 독립적 검증은 사용자 책임 (모델 카드 조건)"))))
     return C
 
 
-def build(M, compare_uni2=False):
+def build(M, compare=None):
     nb = nbf.v4.new_notebook()
-    nb.cells = cells(M, compare_uni2)
+    nb.cells = cells(M, compare)
     nb.metadata = {
         "accelerator": "GPU",
         "colab": {"gpuType": "T4", "provenance": []},
@@ -678,4 +788,5 @@ def build(M, compare_uni2=False):
 
 if __name__ == "__main__":
     build(UNI2)
-    build(HOPT, compare_uni2=True)
+    build(HOPT, compare=["UNI-2"])
+    build(VIRCHOW2, compare=["UNI-2", "H-optimus-0"])
