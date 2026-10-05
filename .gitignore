@@ -8,3 +8,6 @@ __pycache__/
 .ipynb_checkpoints/
 executed/
 .omc/
+hne2cell_cache/
+hne2cell_work/
+hne2cell_hf/
