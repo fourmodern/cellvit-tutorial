@@ -133,7 +133,29 @@ C.append(md(r'''
 **NuInsSeg** (Mahbod et al. 2024, Zenodo 10518968, **CC BY 4.0**): 사람·쥐 31개 장기의 H&E 40x 패치 665장(512×512), 핵 인스턴스 마스크 약 3만 개.
 **TNBC** (Naylor et al., Zenodo 3552674, **CC BY 4.0**): 유방암 40x 512×512 이미지 50장 + 이진 핵 마스크 → 학습에 쓰지 않는 **외부 평가용**.
 
-모델 해상도 0.5 µm/px에 맞춰 512 → 256 px로 줄이고, 학습 때는 224 px을 무작위로 잘라 씁니다. 검증/외부 평가는 가운데 224 px.
+`MPP_IN`에 맞춰 512 px 원본을 `RES` px로 바꾸고(0.5면 256으로 축소, 0.25면 그대로), 학습 때는 224 px을 무작위로 잘라 씁니다. 검증/외부 평가는 가운데 224 px.
+'''))
+C.append(md(r'''
+### 입력 해상도 선택: 0.5 µm/px (기본) vs 0.25 µm/px
+
+| `MPP_IN` | 타일 224 px이 덮는 범위 | 토큰 1칸 | 계산량 | 특징 |
+|---|---|---|---|---|
+| **0.5** (모델 기본) | 112 µm | 7 µm | 1× | 빠름. 림프구가 빽빽한 곳에서 붙은 핵이 가끔 합쳐짐 |
+| **0.25** (40x 원본 그대로) | 56 µm | 3.5 µm | ≈ 3× | 핵 경계가 더 정밀. 문맥이 좁아져 재현율은 떨어질 수 있음 (§2 비교) |
+
+> H-optimus-0는 0.5 µm/px로 학습되었지만, 디코더를 해당 해상도로 다시 학습하면 0.25 µm/px 입력도 동작합니다 (§2에 두 설정의 실제 비교). 
+> 아래 값만 바꾸면 나머지는 자동으로 맞춰집니다 (`BASE_MPP` = 40x 원본 0.25 µm/px 기준).
+'''))
+C.append(code(r'''
+MPP_IN = 0.5                      # 0.5 또는 0.25
+BASE_MPP = 0.25                   # NuInsSeg·TNBC·슬라이드 모두 40x (0.25 µm/px)
+DOWN = BASE_MPP / MPP_IN          # 원본 → 입력 축소 비 (0.5면 1/2, 0.25면 1)
+RES = int(round(512 * DOWN))      # 512 px 원본 패치의 입력 크기 (256 또는 512)
+CROP0 = (RES - 224) // 2          # 검증 때 가운데 224 자르기 시작점
+MATCH_PX = int(round(3 / MPP_IN)) # 검출 매칭 반경 3 µm (px)
+MIN_AREA = 12 if MPP_IN == 0.5 else 40
+SIGMA = 2.0 if MPP_IN == 0.5 else 3.0
+print(f"입력 {MPP_IN} µm/px → 512 원본 패치를 {RES} px로, 토큰 1칸 = {14 * MPP_IN:.1f} µm, 타일 = {224 * MPP_IN:.0f} µm")
 '''))
 C.append(code(r'''
 NUI = DATA / "nuinsseg"
@@ -148,11 +170,16 @@ if not TNB.exists():
     TNB.mkdir(); zipfile.ZipFile(z).extractall(TNB); z.unlink()
 
 def load_pair(img_path, lab_path, binary=False):
-    img = cv2.resize(np.array(Image.open(img_path).convert("RGB")), (256, 256), interpolation=cv2.INTER_AREA)
+    img = np.array(Image.open(img_path).convert("RGB"))
+    if RES != img.shape[0]:
+        img = cv2.resize(img, (RES, RES), interpolation=cv2.INTER_AREA)
     if binary:
-        lab, _ = ndi.label(cv2.resize((np.array(Image.open(lab_path).convert("L")) > 127).astype(np.uint8), (256, 256), interpolation=cv2.INTER_NEAREST))
+        m = (np.array(Image.open(lab_path).convert("L")) > 127).astype(np.uint8)
+        lab, _ = ndi.label(cv2.resize(m, (RES, RES), interpolation=cv2.INTER_NEAREST) if RES != m.shape[0] else m)
     else:
-        lab = cv2.resize(tifffile.imread(lab_path).astype(np.int32), (256, 256), interpolation=cv2.INTER_NEAREST)
+        lab = tifffile.imread(lab_path).astype(np.int32)
+        if RES != lab.shape[0]:
+            lab = cv2.resize(lab, (RES, RES), interpolation=cv2.INTER_NEAREST)
     return img, lab.astype(np.int32)
 
 items = []
@@ -175,7 +202,7 @@ for j, (o, im, lab) in enumerate(show):
     ax[0, j].imshow(im); ax[0, j].set_title(o, fontsize=10)
     ax[1, j].imshow(viz.overlay(im, [dict(contour=c) for c in fn.contours_from_labels(lab).values()], lambda c: (0, 255, 0), mode="contour", thickness=1))
     ax[1, j].set_title(f"핵 {len(np.unique(lab)) - 1}개", fontsize=10)
-[a.axis("off") for a in ax.ravel()]; plt.suptitle("NuInsSeg 예시 (256×256 px @ 0.5 µm/px) · 아래: 인스턴스 마스크 윤곽", fontsize=13); plt.tight_layout(); plt.show()
+[a.axis("off") for a in ax.ravel()]; plt.suptitle(f"NuInsSeg 예시 ({RES}×{RES} px @ {MPP_IN} µm/px) · 아래: 인스턴스 마스크 윤곽", fontsize=13); plt.tight_layout(); plt.show()
 '''))
 C.append(md(r'''
 ### 학습 타깃
@@ -201,7 +228,7 @@ C.append(md(r'''
 - 디코더(`fn.NucleiDecoder`, 3.6M): 특징 4개를 합쳐 16×16 → 28 → 56 → 112 → 224로 올리고, 112·224 단계에서 RGB 이미지에서 뽑은 얕은 특징을 더합니다(핵 경계는 픽셀 정보가 필요).
 - 손실: 3클래스 교차엔트로피 + 내부 Dice + 열지도 MSE.
 - 증강: 무작위 자르기·회전·뒤집기 + **염색 증강**(HED 공간에서 헤마톡실린·에오신 농도 0.6~1.4배, 감마). 염색 증강이 없으면 옅게 염색된 외부 슬라이드에서 핵을 많이 놓칩니다 (TNBC Dice 0.55 → 아래 결과와 비교).
-- 평가: 핵 픽셀 Dice, 검출 F1(예측 중심과 정답 중심이 6 px = 3 µm 이내).
+- 평가: 핵 픽셀 Dice, 검출 F1(예측 중심과 정답 중심이 3 µm 이내).
 '''))
 C.append(code(r'''
 backbone = timm.create_model("hf-hub:bioptimus/H-optimus-0", pretrained=True, init_values=1e-5, dynamic_img_size=False).eval().to(DEVICE)
@@ -213,7 +240,7 @@ JIT = transforms.ColorJitter(0.3, 0.3, 0.3, 0.06)
 BOUNDARY_PX = 1   # 경계 클래스 두께 (px @ 0.5 µm/px)
 
 def augment(img, lab):
-    y0, x0 = rng.integers(0, 33, 2)
+    y0, x0 = rng.integers(0, RES - 224 + 1, 2)
     img, lab = img[y0:y0 + 224, x0:x0 + 224], lab[y0:y0 + 224, x0:x0 + 224]
     k = rng.integers(4); img, lab = np.rot90(img, k), np.rot90(lab, k)
     if rng.random() < 0.5:
@@ -222,7 +249,8 @@ def augment(img, lab):
     return np.array(JIT(Image.fromarray(img))), np.ascontiguousarray(lab)
 
 @torch.inference_mode()
-def predict_center(ds, crop=16):
+def predict_center(ds, crop=None):
+    crop = CROP0 if crop is None else crop
     # 256 이미지의 가운데 224 → (softmax 3채널, 열지도) 리스트
     decoder.eval(); outs = []
     for b in range(0, len(ds), 16):
@@ -233,13 +261,14 @@ def predict_center(ds, crop=16):
         outs += list(zip(torch.softmax(out[:, :3], 1).cpu().numpy(), out[:, 3].clamp(0, 1).cpu().numpy()))
     return outs
 
-def evaluate(ds, crop=16):
+def evaluate(ds, crop=None):
+    crop = CROP0 if crop is None else crop
     d_, f_ = [], []
     for (o, im, lab), (p, h) in zip(ds, predict_center(ds, crop)):
-        gt = lab[crop:crop + 224, crop:crop + 224]; pl = fn.instances_from_maps(p, h)
+        gt = lab[crop:crop + 224, crop:crop + 224]; pl = fn.instances_from_maps(p, h, min_area=MIN_AREA)
         d_.append(fn.dice(pl > 0, gt > 0))
         g = np.array([c for _, c, _ in fn.instance_props(gt)]); q = np.array([c for _, c, _ in fn.instance_props(pl)])
-        f_.append(fn.detection_f1(q, g, 6)[2] if len(g) else np.nan)
+        f_.append(fn.detection_f1(q, g, MATCH_PX)[2] if len(g) else np.nan)
     return float(np.mean(d_)), float(np.nanmean(f_))
 
 EPOCHS, LR, BS = 12, 1e-3, 16
@@ -252,7 +281,7 @@ for ep in range(EPOCHS):
     for b in range(0, len(perm), BS):
         xs, cs, hs = [], [], []
         for i in perm[b:b + BS]:
-            im, lab = augment(TRAIN[i][1], TRAIN[i][2]); c, h = fn.make_targets(lab, boundary_px=BOUNDARY_PX)
+            im, lab = augment(TRAIN[i][1], TRAIN[i][2]); c, h = fn.make_targets(lab, boundary_px=BOUNDARY_PX, sigma=SIGMA)
             xs.append(TF(Image.fromarray(im))); cs.append(torch.from_numpy(c)); hs.append(torch.from_numpy(h))
         x, c, h = torch.stack(xs).to(DEVICE), torch.stack(cs).to(DEVICE), torch.stack(hs).to(DEVICE)
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=DEVICE == "cuda"):
@@ -263,8 +292,8 @@ for ep in range(EPOCHS):
     hist.append(dict(epoch=ep + 1, loss=np.mean(losses), val_dice=vd, val_f1=vf))
     print(f"epoch {ep + 1:2d}: loss {np.mean(losses):.3f} | 검증 Dice {vd:.3f} · 검출 F1 {vf:.3f} | {time.time() - t0:.0f}s")
     if vf > best:
-        best = vf; torch.save(decoder.state_dict(), OUT / "nuclei_decoder.pt")
-decoder.load_state_dict(torch.load(OUT / "nuclei_decoder.pt"))
+        best = vf; torch.save(decoder.state_dict(), OUT / f"nuclei_decoder_{MPP_IN}um.pt")
+decoder.load_state_dict(torch.load(OUT / f"nuclei_decoder_{MPP_IN}um.pt"))
 H = pd.DataFrame(hist)
 '''))
 C.append(code(r'''
@@ -280,17 +309,30 @@ print(f"최종 — 검증: Dice {H.val_dice.iloc[-1]:.3f}, 검출 F1 {best:.3f} 
 C.append(md(r'''
 > TNBC의 정답은 **이진 마스크**라 붙어 있는 핵이 하나로 합쳐져 있습니다. 검출 F1은 그 영향으로 실제보다 낮게 나옵니다. Dice를 주로 보세요.
 
+**두 해상도를 같은 조건(12 epoch)으로 학습한 결과** (RTX 3090 Ti, 이 노트북을 두 설정으로 실행; 12 epoch 디코더는 실행마다 ±0.03 정도 변동):
+
+| 입력 | 검증 Dice | 검증 검출 F1 | TNBC Dice | TNBC 검출 F1 | ROI 1 mm² 처리 | ROI 핵 수 |
+|---|---|---|---|---|---|---|
+| 0.5 µm/px | 0.80 | 0.73 | 0.67~0.77 | 0.81 | 47s | 14,285 |
+| 0.25 µm/px | 0.77 | **0.77** | 0.71~0.76 | 0.81 | 140s (3×) | 11,683 |
+
+- 패치 벤치마크에서는 0.25가 **검출 F1이 높습니다** (붙은 핵의 경계를 더 잘 나눔). Dice는 0.5가 약간 높습니다 (넓은 문맥).
+- 그런데 **슬라이드 ROI에서는 0.25가 핵을 오히려 적게 찾았습니다** — 림프 응집 확대(§3)를 보면 0.25는 윤곽이 더 정확하지만 또렷한 림프구를 꽤 놓칩니다. 
+  시야가 56 µm로 좁아져 문맥이 줄고, 작은 조각 제거 기준(`MIN_AREA`)과 12 epoch 디코더의 변동이 겹친 결과로 보입니다. 다른 실행에서는 0.25가 5% 더 찾기도 했습니다.
+- **정리**: 기본은 0.5 µm/px(빠르고 안정적). 0.25는 빽빽한 핵의 **경계 정밀도**가 중요할 때 쓰되, epoch을 늘리고 `MIN_AREA`를 검증 데이터로 조정한 뒤 재현율을 꼭 확인하세요.
+
 ### 예측 예시 (검증 · 외부)
 초록 = 정답 윤곽, 빨강 = 예측 윤곽.
 '''))
 C.append(code(r'''
-def show_preds(ds, n=4, crop=16, title=""):
+def show_preds(ds, n=4, crop=None, title=""):
+    crop = CROP0 if crop is None else crop
     pick = [ds[i] for i in rng.choice(len(ds), n, replace=False)]
     preds = predict_center(pick, crop)
     fig, ax = plt.subplots(2, n, figsize=(4.6 * n, 9.4))
     for j, ((o, im, lab), (p, h)) in enumerate(zip(pick, preds)):
         im_, gt = im[crop:crop + 224, crop:crop + 224], lab[crop:crop + 224, crop:crop + 224]
-        pl = fn.instances_from_maps(p, h)
+        pl = fn.instances_from_maps(p, h, min_area=MIN_AREA)
         ax[0, j].imshow(viz.overlay(im_, [dict(contour=c) for c in fn.contours_from_labels(gt).values()], lambda c: (0, 230, 0), mode="contour", thickness=1))
         ax[0, j].set_title(f"{o} · 정답 {len(np.unique(gt)) - 1}개", fontsize=10)
         ax[1, j].imshow(viz.overlay(im_, [dict(contour=c) for c in fn.contours_from_labels(pl).values()], lambda c: (255, 40, 40), mode="contour", thickness=1))
@@ -305,7 +347,7 @@ C.append(md(r'''
 ## 3. 슬라이드 영역에 적용: 분할 + 토큰 맵을 한 번에
 
 09와 같은 대장암 슬라이드(TCGA-AD-6890, GDC open access)의 4,096×4,096 px(1 mm²) 영역입니다.
-`fn.RoiRunner`가 영역을 0.5 µm/px로 줄여 224 타일을 절반씩 겹쳐 훑고, 타일마다 **디코더 출력의 가운데 112×112**와 **토큰의 가운데 8×8**만 기록합니다.
+`fn.RoiRunner`가 영역을 `MPP_IN` 해상도로 맞춰 224 타일을 절반씩 겹쳐 훑고, 타일마다 **디코더 출력의 가운데 112×112**와 **토큰의 가운데 8×8**만 기록합니다.
 한 번 훑으면 분할 맵과 토큰 맵이 모두 나옵니다.
 '''))
 C.append(code(r'''
@@ -315,35 +357,38 @@ if not SLIDE.exists():
 slide = openslide.OpenSlide(str(SLIDE)); MPP = float(slide.properties["openslide.mpp-x"])
 ROI_X, ROI_Y, ROI = 17000, 5500, 4096
 roi_img = np.array(slide.read_region((ROI_X, ROI_Y), 0, (ROI, ROI)).convert("RGB"))     # 0.25 µm/px
-roi05 = cv2.resize(roi_img, (ROI // 2, ROI // 2), interpolation=cv2.INTER_AREA)         # 0.5 µm/px (모델 해상도)
-SCALE = MPP * 2   # roi05 1 px = µm
+roi05 = cv2.resize(roi_img, (int(ROI * DOWN), int(ROI * DOWN)), interpolation=cv2.INTER_AREA) if DOWN != 1 else roi_img   # 입력 해상도
+SCALE = MPP / DOWN    # 입력 1 px = µm
+S0 = int(round(1 / DOWN))   # 입력 좌표 → 원본(level-0) 좌표 배율 (0.5면 2, 0.25면 1)
 
 runner = fn.RoiRunner(backbone, decoder, TF, device=DEVICE, batch=16)
 t = time.time()
 PROB, HEAT, FMAP = runner.run(roi05)
-LAB = fn.instances_from_maps(PROB, HEAT)
+LAB = fn.instances_from_maps(PROB, HEAT, min_area=MIN_AREA)
 props = fn.instance_props(LAB); CONT = fn.contours_from_labels(LAB)
 print(f"한 번 훑기 {time.time() - t:.0f}s → 분할 맵 {PROB.shape[1:]} · 토큰 맵 {FMAP.shape} | 검출된 핵 {len(props):,}개")
 np.save(OUT / "h0_token_map.npy", FMAP)
 '''))
 C.append(code(r'''
 fig, ax = plt.subplots(1, 3, figsize=(22, 7.6))
-ax[0].imshow(roi05); ax[0].set_title("조직 사진 (0.5 µm/px)")
+ax[0].imshow(roi05); ax[0].set_title(f"조직 사진 ({MPP_IN} µm/px)")
 ax[1].imshow(PROB[1] + PROB[2], cmap="magma"); ax[1].set_title("핵 확률 (내부 + 경계)")
-z = (slice(600, 900), slice(900, 1200))
-cz = [dict(contour=c - (900, 600)) for c in CONT.values() if z[1].start <= c[:, 0].mean() < z[1].stop and z[0].start <= c[:, 1].mean() < z[0].stop]
-ax[2].imshow(viz.overlay(np.ascontiguousarray(roi05[z]), cz, lambda c: (255, 40, 40), mode="contour", thickness=1)); ax[2].set_title(f"확대 (300×300 px = 150 µm): 핵 {len(cz)}개")
+zs = int(round(150 / SCALE)); zy0, zx0 = int(1300 * DOWN * 2), int(600 * DOWN * 2)   # 림프 응집 (0.25 µm/px 기준 (600, 1300)에서 150 µm)
+z = (slice(zy0, zy0 + zs), slice(zx0, zx0 + zs))
+cz = [dict(contour=c - (zx0, zy0)) for c in CONT.values() if z[1].start <= c[:, 0].mean() < z[1].stop and z[0].start <= c[:, 1].mean() < z[0].stop]
+ax[2].imshow(viz.overlay(np.ascontiguousarray(roi05[z]), cz, lambda c: (255, 40, 40), mode="contour", thickness=1)); ax[2].set_title(f"림프 응집 확대 (150 µm): 핵 {len(cz)}개")
 [a.axis("off") for a in ax]; plt.tight_layout(); plt.show()
 '''))
 C.append(md(r'''
-> **보이는 한계**: 림프 응집처럼 핵이 빽빽한 곳에서는 붙어 있는 핵 2~3개가 하나로 합쳐지는 경우가 있습니다 (토큰 1칸 = 7 µm). 
-> 검출된 핵 수(약 1.3만)가 09의 CellViT(약 2.9만, 0.25 µm/px 입력)보다 적은 주된 이유입니다. 0.25 µm/px로 입력하면 나아지지만 계산이 4배 듭니다 (정리 참고).
+> **보이는 한계**: 0.5 µm/px에서는 림프 응집처럼 핵이 빽빽한 곳에서 붙어 있는 핵 2~3개가 하나로 합쳐지는 경우가 있습니다 (토큰 1칸 = 7 µm). 
+> `MPP_IN = 0.25`(3.5 µm 토큰)로 바꾸면 윤곽은 더 정밀해지지만, 이 노트북의 실행에서는 림프 응집의 핵을 더 많이 놓쳤습니다 (§2 비교 표 참고). 
+> 검출 수(약 1.2~1.4만)가 09의 CellViT(약 2.9만)보다 적은 것은 해상도 외에도 CellViT가 작은 조각까지 핵으로 세는 경향, 후처리 기준 차이 때문이므로 숫자 자체보다 확대 그림으로 판단하세요.
 
 ### 인터랙티브: 조직 위 핵 윤곽
-휠로 확대, 범례 클릭. 윤곽 좌표는 원본 해상도(0.25 µm/px)로 2배 해서 그립니다.
+휠로 확대, 범례 클릭. 윤곽 좌표는 원본 해상도(0.25 µm/px)로 바꿔 그립니다.
 '''))
 C.append(code(r'''
-cells = [dict(id=i, contour=CONT[i] * 2, centroid=(cx * 2, cy * 2), area_um2=a * SCALE ** 2) for i, (cx, cy), a in props if i in CONT]
+cells = [dict(id=i, contour=CONT[i] * S0, centroid=(cx * S0, cy * S0), area_um2=a * SCALE ** 2) for i, (cx, cy), a in props if i in CONT]
 vx, vy, vs_ = 1024, 1024, 2048
 sub = [c for c in cells if vx <= c["centroid"][0] < vx + vs_ and vy <= c["centroid"][1] < vy + vs_]
 viz.interactive(roi_img[vy:vy + vs_, vx:vx + vs_], sub, lambda c: (255, 60, 60), lambda c: "핵", hover_of=lambda c: f"핵 #{c['id']}<br>면적 {c['area_um2']:.0f} µm²",
@@ -355,10 +400,11 @@ C.append(md(r'''
 ## 4. 세포 임베딩: 같은 토큰 맵에서 마스크로 꺼내기
 
 각 핵이 덮는 토큰 칸(14×14 px)을 겹친 픽셀 수로 가중 평균합니다 (`fn.mask_pool`).
-`DILATE_PX`로 핵 바깥 세포질 몫을 조금 넓힐 수 있습니다 (2 px = 1 µm).
+`DILATE_UM`으로 핵 바깥 세포질 몫을 조금 넓힐 수 있습니다.
 '''))
 C.append(code(r'''
-DILATE_PX = 2
+DILATE_UM = 1.0
+DILATE_PX = int(round(DILATE_UM / SCALE))
 t = time.time()
 EMB = fn.mask_pool(FMAP, LAB, dilate_px=DILATE_PX)
 ids = [i for i in EMB if i in CONT]
@@ -385,7 +431,7 @@ ax[1].axis("off"); ax[1].set_title("군집을 조직 위에")
 plt.tight_layout(); plt.show()
 
 read_roi = lambda x, y, s: np.array(slide.read_region((int(x) + ROI_X, int(y) + ROI_Y), 0, (s, s)).convert("RGB"))
-gal = [dict(contour=CONT[i] * 2, centroid=tuple(xy05[n] * 2), cluster=clus[n]) for n, i in enumerate(ids)]
+gal = [dict(contour=CONT[i] * S0, centroid=tuple(xy05[n] * S0), cluster=clus[n]) for n, i in enumerate(ids)]
 viz.cell_gallery(gal, lambda c: c["cluster"], lambda c: KCOL[c["cluster"]], order=list(KCOL), get_crop=read_roi, n=12, size=72,
                  title="군집별 세포 (원본 H&E, 윤곽 = H-optimus-0 디코더 분할)")
 '''))
@@ -402,7 +448,7 @@ C.append(md(r'''
 ## 5. 세포 분류 성능: NuCLS 점 라벨
 
 09 노트북과 같은 평가입니다. 다른 점은 **핵 검출도 이 노트북의 디코더가** 한다는 것입니다.
-NuCLS(CC0) 이미지에서 핵을 검출하고, 정답 점(4종: Tumor / nonTIL Stromal / sTIL / Other)과 짝지은(≤ 6 µm) 세포의 임베딩으로 로지스틱 회귀를 학습합니다.
+NuCLS(CC0) 이미지에서 핵을 검출하고, 정답 점(4종: Tumor / nonTIL Stromal / sTIL / Other)과 짝지은(≤ 3 µm) 세포의 임베딩으로 로지스틱 회귀를 학습합니다.
 
 > 09에서 같은 평가(CellViT 검출 + CellViT 임베딩 / H-optimus-0 마스크 임베딩)는 macro-F1 약 0.50이었습니다. 세포 수가 적어 오차가 큽니다.
 '''))
@@ -419,17 +465,17 @@ def nucls_rows(split):
     rows = []
     for p in sorted((NUCLS_DIR / split / "images").glob("*.png")):
         img = np.array(Image.open(p).convert("RGB"))                         # 256 px @ 0.25 µm/px
-        img05 = cv2.resize(img, (128, 128), interpolation=cv2.INTER_AREA)
+        img05 = cv2.resize(img, (int(256 * DOWN), int(256 * DOWN)), interpolation=cv2.INTER_AREA) if DOWN != 1 else img
         lbl = pd.read_csv(NUCLS_DIR / split / "labels" / f"{p.stem}.csv", header=None, names=["x", "y", "label"])
-        prob, heat, fmap = runner.run(img05); lab = fn.instances_from_maps(prob, heat)
+        prob, heat, fmap = runner.run(img05); lab = fn.instances_from_maps(prob, heat, min_area=MIN_AREA)
         pr = fn.instance_props(lab)
         if not pr:
             continue
         emb = fn.mask_pool(fmap, lab, dilate_px=DILATE_PX)
-        dc = np.array([c for _, c, _ in pr]); gt = lbl[["x", "y"]].values / 2
+        dc = np.array([c for _, c, _ in pr]); gt = lbl[["x", "y"]].values * DOWN
         d = np.linalg.norm(gt[:, None] - dc[None], axis=-1); gi, di = linear_sum_assignment(d)
         for g, k in zip(gi, di):
-            if d[g, k] <= 6 and pr[k][0] in emb:
+            if d[g, k] <= MATCH_PX and pr[k][0] in emb:
                 rows.append(dict(label=int(lbl.label[g]), emb=emb[pr[k][0]]))
     return rows
 TR_, TE_ = nucls_rows("train"), nucls_rows("test")
@@ -454,7 +500,7 @@ C.append(md(r'''
 
 | 파일 | 내용 |
 |---|---|
-| `nuclei_decoder.pt` | 학습한 디코더 가중치 (3.6M, 약 14MB). H-optimus-0 + 이 가중치로 어디서든 재현 |
+| `nuclei_decoder_{MPP_IN}um.pt` | 학습한 디코더 가중치 (3.6M, 약 14MB). H-optimus-0 + 이 가중치 + 같은 `MPP_IN`으로 어디서든 재현 |
 | `h0_token_map.npy` | 영역 토큰 맵 — 나중에 모델 없이 좌표로 임베딩 꺼내기 |
 | `cells.csv` / `cells.npz` | 세포별 슬라이드 좌표(level-0), 면적, 군집 / 임베딩 |
 | `cells.geojson` | QuPath `File → Import objects` |
@@ -463,11 +509,11 @@ C.append(md(r'''
 (H-optimus-0 모델 카드의 의료 규제 관련 면책 조건은 그대로 적용).
 '''))
 C.append(code(r'''
-df = pd.DataFrame({"id": ids, "x_level0": xy05[:, 0] * 2 + ROI_X, "y_level0": xy05[:, 1] * 2 + ROI_Y,
+df = pd.DataFrame({"id": ids, "x_level0": xy05[:, 0] * S0 + ROI_X, "y_level0": xy05[:, 1] * S0 + ROI_Y,
                    "area_um2": [dict((i, a) for i, _, a in props)[i] * SCALE ** 2 for i in ids], "cluster": clus})
 df.to_csv(OUT / "cells.csv", index=False)
 np.savez_compressed(OUT / "cells.npz", id=np.array(ids), xy_level0=df[["x_level0", "y_level0"]].values, emb=E.astype(np.float16))
-feats = [{"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [(CONT[i] * 2 + (ROI_X, ROI_Y)).tolist() + [(CONT[i][0] * 2 + (ROI_X, ROI_Y)).tolist()]]},
+feats = [{"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [(CONT[i] * S0 + (ROI_X, ROI_Y)).tolist() + [(CONT[i][0] * S0 + (ROI_X, ROI_Y)).tolist()]]},
           "properties": {"objectType": "detection", "classification": {"name": c, "color": list(KCOL[c])}}} for i, c in zip(ids, clus)]
 (OUT / "cells.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": feats}))
 !ls -lh {OUT}
@@ -483,7 +529,7 @@ C.append(md(r'''
 | 분류 | 자체 점 라벨로 작은 분류기 (NuCLS CC0 예시) | — |
 
 **다음 단계**
-- 디코더 입력 해상도: 0.5 µm/px 토큰(7 µm)은 작은 림프구가 빽빽한 곳에서 한계가 있습니다. 0.25 µm/px 이미지를 그대로 넣어(타일 = 56 µm) 토큰을 3.5 µm로 만들면 분할은 좋아지지만 계산은 4배입니다.
+- 입력 해상도: 기본 0.5 µm/px가 빠르고 안정적입니다. `MPP_IN = 0.25`는 경계 정밀도가 좋아지지만(패치 검출 F1 ↑) 이 예제의 슬라이드에서는 재현율이 떨어졌고 계산은 3배입니다. 쓰려면 epoch·`MIN_AREA`를 조정하고 재현율을 검증하세요.
 - backbone 교체: `timm.create_model(...)`과 정규화 값만 바꾸면 UNI-2·Virchow2에서도 같은 디코더 구조를 학습할 수 있습니다 (라이선스 주의).
 - 학습 데이터 추가: 자체 조직의 핵 마스크 수십 장만 더해 미세조정하면 도메인 차이를 줄일 수 있습니다.
 - 슬라이드 전체: `RoiRunner`를 큰 타일(예: 4096 px) 단위로 돌리고 토큰 맵을 zarr로 저장하세요.
