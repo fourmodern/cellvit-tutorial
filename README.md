@@ -10,6 +10,7 @@
 | `06_H-optimus-0.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/06_H-optimus-0.ipynb) | H-optimus-0: 05와 같은 구성 + UNI-2와 같은 데이터·같은 평가로 비교 |
 | `07_Virchow2.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/07_Virchow2.ipynb) | Virchow2 (CLS + 패치 평균 2,560차원 임베딩): 05와 같은 구성 + **UNI-2 · H-optimus-0 · Virchow2 세 모델 비교** (few-shot 곡선, 클래스별 F1, 처리 속도, 슬라이드 조직 지도 일치율) |
 | `08_PEFT_finetuning.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/08_PEFT_finetuning.ipynb) | Foundation model 미세조정: 선형 분류기 vs Adapter 헤드 vs Bottleneck Adapter(직접 구현) vs **LoRA(HuggingFace `peft`)** — PatchCamelyon 림프절 전이 검출, 학습 파라미터·GPU 메모리·시간·AUROC 비교, LoRA 저장/불러오기/병합 |
+| `09_cell_embeddings_from_FM.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/09_cell_embeddings_from_FM.ipynb) | Foundation model 잠재공간에서 **좌표로 세포 임베딩 꺼내기**: CellViT 분할 → H-optimus-0 토큰 맵 한 번 계산·저장 → 세포 중심점 / **세포 크기 마스크** / 주변 문맥 임베딩, 토큰 맵 PCA, 세포 UMAP·유사 세포 검색·군집 지도, NuCLS로 CellViT 임베딩과 비교 |
 
 ## 시각화
 
