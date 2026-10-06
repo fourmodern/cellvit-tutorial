@@ -11,6 +11,7 @@
 | `07_Virchow2.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/07_Virchow2.ipynb) | Virchow2 (CLS + 패치 평균 2,560차원 임베딩): 05와 같은 구성 + **UNI-2 · H-optimus-0 · Virchow2 세 모델 비교** (few-shot 곡선, 클래스별 F1, 처리 속도, 슬라이드 조직 지도 일치율) |
 | `08_PEFT_finetuning.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/08_PEFT_finetuning.ipynb) | Foundation model 미세조정: 선형 분류기 vs Adapter 헤드 vs Bottleneck Adapter(직접 구현) vs **LoRA(HuggingFace `peft`)** — PatchCamelyon 림프절 전이 검출, 학습 파라미터·GPU 메모리·시간·AUROC 비교, LoRA 저장/불러오기/병합 |
 | `09_cell_embeddings_from_FM.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/09_cell_embeddings_from_FM.ipynb) | Foundation model 잠재공간에서 **좌표로 세포 임베딩 꺼내기**: CellViT 분할 → H-optimus-0 토큰 맵 한 번 계산·저장 → 세포 중심점 / **세포 크기 마스크** / 주변 문맥 임베딩, 토큰 맵 PCA, 세포 UMAP·유사 세포 검색·군집 지도, NuCLS로 CellViT 임베딩과 비교 |
+| `10_single_backbone_pipeline.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fourmodern/cellvit-tutorial/blob/main/10_single_backbone_pipeline.ipynb) | **CellViT 없이 H-optimus-0 하나로** 핵 검출·분할·임베딩: 고정 backbone 중간 특징 위에 3.6M 디코더를 NuInsSeg(CC BY 4.0)로 학습(염색 증강), TNBC 외부 평가, 슬라이드 영역 한 번 훑기로 분할+토큰 맵, 마스크 풀링 임베딩, NuCLS 분류, GeoJSON 내보내기. 전 구성 요소 상업적 이용 가능 라이선스 |
 
 ## 시각화
 
@@ -43,6 +44,7 @@
   - Virchow2 (`paige-ai/Virchow2`): 기관 이메일 필요. CC BY-NC-ND 4.0, 학술 연구 전용(임상·RUO·상업적 이용 금지).
 - 학습·평가 데이터: Kather et al. CRC-VAL-HE-7K (대장 조직 9종, 224px @ 0.5 µm/px, CC BY 4.0, 800MB, Zenodo).
 - 슬라이드 예제: TCGA-AD-6890 대장암 진단 슬라이드 (GDC open access, 73MB).
+- 10 분할 학습 데이터: NuInsSeg (Zenodo 10518968, CC BY 4.0, 1.6GB), 외부 평가 TNBC (Zenodo 3552674, CC BY 4.0). 공통 모듈 `fm_nuclei.py` (디코더·후처리·타일 처리).
 - 08 미세조정 데이터: PatchCamelyon (HuggingFace `1aurent/PatchCamelyon`, CC0) 학습·평가 파일 각 1개. UNI-2·Virchow2로 학습한 Adapter/LoRA 가중치는 라이선스상 배포 금지.
 
 ## HNE2Cell 노트북 참고
